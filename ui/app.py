@@ -1318,11 +1318,6 @@ async def v20_dashboard(_: web.Request) -> web.Response:
     return web.json_response(v20_store.dashboard_payload(), dumps=lambda value: json.dumps(value, default=str))
 
 
-async def v20_refresh(_: web.Request) -> web.Response:
-    v20_store.refresh_live_store(force=True)
-    return web.json_response(v20_store.dashboard_payload(), dumps=lambda value: json.dumps(value, default=str))
-
-
 async def v20_stocks(request: web.Request) -> web.Response:
     v20_store.refresh_realtime_snapshot()
     filters = _query_payload(request)
@@ -1619,7 +1614,6 @@ def create_app() -> web.Application:
     app.router.add_get("/api/export/watchlist", export_watchlist)
     app.router.add_get("/api/intraday/quick-signal/{symbol}", quick_intraday_signal)
     app.router.add_get("/api/v20/dashboard", v20_dashboard)
-    app.router.add_post("/api/v20/refresh", v20_refresh)
     app.router.add_get("/api/v20/stocks", v20_stocks)
     app.router.add_get("/api/v20/indices", v20_indices)
     app.router.add_get("/api/v20/news", v20_news)

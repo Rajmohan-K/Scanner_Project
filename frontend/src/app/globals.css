@@ -1152,6 +1152,16 @@ input[type="checkbox"] {
   max-width: 150px;
 }
 
+.api-target-select {
+  min-height: 40px;
+  max-width: 122px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font-weight: 800;
+}
+
 .tone-good { color: var(--success) !important; }
 .tone-bad { color: var(--danger) !important; }
 .tone-warn { color: var(--warning) !important; }

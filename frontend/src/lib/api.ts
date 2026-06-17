@@ -1,9 +1,41 @@
 import axios from 'axios';
 
+export type ApiTargetMode = 'local' | 'server';
+
+const API_TARGET_KEY = 'scanner-api-target';
+const LOCAL_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:5000';
+const SERVER_API_BASE = 'http://16.176.23.42';
+
+function browserStorage() {
+  return typeof window !== 'undefined' ? window.localStorage : null;
+}
+
+export function getApiTargetMode(): ApiTargetMode {
+  const stored = browserStorage()?.getItem(API_TARGET_KEY);
+  return stored === 'server' ? 'server' : 'local';
+}
+
+export function getApiBaseUrl(mode: ApiTargetMode = getApiTargetMode()) {
+  return mode === 'server' ? SERVER_API_BASE : LOCAL_API_BASE;
+}
+
+export function setApiTargetMode(mode: ApiTargetMode) {
+  browserStorage()?.setItem(API_TARGET_KEY, mode);
+  clearApiCache();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('scanner-api-target-changed', { detail: { mode, baseUrl: getApiBaseUrl(mode) } }));
+  }
+}
+
 const client = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:5000',
+  baseURL: getApiBaseUrl(),
   headers: { 'Content-Type': 'application/json' },
   timeout: 15000,
+});
+
+client.interceptors.request.use((config) => {
+  config.baseURL = getApiBaseUrl();
+  return config;
 });
 
 const getCache = new Map<string, { expiresAt: number; data: any }>();

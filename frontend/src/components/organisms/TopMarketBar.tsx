@@ -5,7 +5,7 @@ import { useSelector } from 'react-redux';
 import { Bell, Maximize2, Play, Save, Settings, Square, Sun } from 'lucide-react';
 import CommandPalette from './CommandPalette';
 import useDarkMode from '@/hooks/useDarkMode';
-import { getV20Indices, saveV20Scanner, startScan, stopAllScans } from '@/lib/api';
+import { ApiTargetMode, getApiTargetMode, getV20Indices, saveV20Scanner, setApiTargetMode, startScan, stopAllScans } from '@/lib/api';
 import { useToast } from '@/components/layout/ToastProvider';
 import { getActiveScanLabel, useActiveScanStatus } from '@/hooks/useActiveScanStatus';
 import { RootState } from '@/state/store';
@@ -18,6 +18,7 @@ export default function TopMarketBar() {
   const [loadingIndices, setLoadingIndices] = useState(true);
   const [scanToggling, setScanToggling] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState('');
+  const [apiTarget, setApiTarget] = useState<ApiTargetMode>('local');
   const indicesRef = React.useRef<any[]>([]);
   const { activeCount, primaryScan, refresh: refreshScanStatus } = useActiveScanStatus(1000);
   const scanRunning = activeCount > 0;
@@ -43,10 +44,21 @@ export default function TopMarketBar() {
   }
 
   useEffect(() => {
+    setApiTarget(getApiTargetMode());
     loadIndices();
     const timer = window.setInterval(() => loadIndices(true), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  function handleApiTargetChange(mode: ApiTargetMode) {
+    setApiTarget(mode);
+    setApiTargetMode(mode);
+    setIndices([]);
+    indicesRef.current = [];
+    setLoadingIndices(true);
+    toast?.push(`API target changed to ${mode === 'server' ? 'Server' : 'Local'}`, 'success');
+    window.setTimeout(() => loadIndices(), 50);
+  }
 
   async function handleScanToggle() {
     try {
@@ -143,6 +155,10 @@ export default function TopMarketBar() {
         <Link className="icon-button" href="/notifications" title="Alerts and notifications" aria-label="Alerts and notifications"><Bell size={16} /></Link>
         <button className="icon-button" type="button" title="Toggle theme" onClick={toggle}><Sun size={16} /></button>
         <button className="icon-button" type="button" title="Fullscreen" onClick={handleFullscreen}><Maximize2 size={16} /></button>
+        <select className="api-target-select" value={apiTarget} onChange={(event) => handleApiTargetChange(event.target.value as ApiTargetMode)} title="Backend API target">
+          <option value="local">Local API</option>
+          <option value="server">Server API</option>
+        </select>
         <button className="btn-secondary" type="button" onClick={handleSaveScan}><Save size={15} /> Save Scan</button>
         {scanRunning && <span className="top-scan-chip" title={scanLabel}>{activeCount} active</span>}
         <button
