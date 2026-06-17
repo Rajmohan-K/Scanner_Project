@@ -4,7 +4,7 @@ export type ApiTargetMode = 'local' | 'server';
 
 const API_TARGET_KEY = 'scanner-api-target';
 const LOCAL_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:5000';
-const SERVER_API_BASE = 'http://16.176.23.42';
+const SERVER_API_BASE = 'http://16.176.23.42:5000';
 
 function browserStorage() {
   return typeof window !== 'undefined' ? window.localStorage : null;
