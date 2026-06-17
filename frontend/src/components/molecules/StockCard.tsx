@@ -1,8 +1,9 @@
 "use client";
 import React, { memo, useState } from 'react';
 import { useDispatch } from 'react-redux';
-import { ArrowRightLeft, BarChart3, FileDown, GitCompare, Pin, Star, Telescope } from 'lucide-react';
+import { ArrowRightLeft, BarChart3, BellPlus, FileDown, GitCompare, Pin, Star, Telescope } from 'lucide-react';
 import { addSymbol } from '@/state/watchlistSlice';
+import { addStocksToLiveMonitor } from '@/lib/liveMonitor';
 
 export type StockRecord = {
   stock?: string;
@@ -71,6 +72,10 @@ function StockCardComponent({ item }: { item: StockRecord }) {
     if (symbol) dispatch(addSymbol(symbol));
   }
 
+  function handleAddToLiveMonitor() {
+    addStocksToLiveMonitor([item], 'stock-card');
+  }
+
   return (
     <article className={`stock-card stock-card--${action.toLowerCase().replace(/\s+/g, '-')}`}>
       <header className="stock-card__header">
@@ -129,6 +134,7 @@ function StockCardComponent({ item }: { item: StockRecord }) {
 
       <footer className="stock-card__actions">
         <button className="icon-button" onClick={handlePin} title="Pin to watchlist" type="button"><Pin size={16} /></button>
+        <button className="icon-button" onClick={handleAddToLiveMonitor} title="Add to dashboard live monitor" type="button"><BellPlus size={16} /></button>
         <button className="icon-button" title="Push to intraday" type="button"><ArrowRightLeft size={16} /></button>
         <button className="icon-button" title="Push to swing" type="button"><Star size={16} /></button>
         <button className="icon-button" title="Compare stocks" type="button"><GitCompare size={16} /></button>

@@ -1084,9 +1084,68 @@ input[type="checkbox"] {
   box-shadow: var(--shadow);
 }
 
+.toast small {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
 .toast--success { border-color: rgba(72, 213, 155, 0.42); }
 .toast--warning { border-color: rgba(239, 200, 74, 0.42); }
 .toast--error { border-color: rgba(255, 101, 120, 0.42); }
+
+.notification-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.notification-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 0.85rem;
+  align-items: center;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(16, 28, 48, 0.72);
+}
+
+.notification-row strong {
+  display: block;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.notification-row small {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+}
+
+.notification-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--accent);
+  background: rgba(89, 220, 255, 0.11);
+}
+
+.notification-row--success .notification-icon { color: var(--success); background: rgba(72, 213, 155, 0.12); }
+.notification-row--warning .notification-icon { color: var(--warning); background: rgba(239, 200, 74, 0.12); }
+.notification-row--error .notification-icon { color: var(--danger); background: rgba(255, 101, 120, 0.12); }
+
+.notification-count {
+  min-width: 54px;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  text-align: center;
+  font-weight: 800;
+}
 
 .tone-good { color: var(--success) !important; }
 .tone-bad { color: var(--danger) !important; }

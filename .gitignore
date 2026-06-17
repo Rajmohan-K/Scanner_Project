@@ -14,8 +14,12 @@ logs/
 frontend/node_modules/
 frontend/.next/
 frontend/reports/
+frontend/src/app/notifications/
 reports/output/
 ui/data/*.json
 !ui/data/settings.json
 ui/data/strategies/*.json
+ui/reports/output
 scanner_project_bkp_*.zip
+.env.example
+.env

@@ -9,6 +9,7 @@ import { useDispatch } from 'react-redux';
 import { setTopStocks } from '@/state/dashboardSlice';
 import { DataTable, MetricTile, PageHero, TerminalPanel, Toolbar } from '@/components/terminal/TerminalPrimitives';
 import { useToast } from '@/components/layout/ToastProvider';
+import { addStocksToLiveMonitor } from '@/lib/liveMonitor';
 
 export default function SwingPage() {
   const dispatch = useDispatch();
@@ -163,7 +164,8 @@ export default function SwingPage() {
       window.localStorage.setItem(monitorStorageKey, JSON.stringify(next.map(symbolOf).filter(Boolean)));
       return next;
     });
-    toast?.push(`${symbol} added to swing monitor`, 'success');
+    addStocksToLiveMonitor([{ ...stock, symbol }], 'swing');
+    toast?.push(`${symbol} added to swing and dashboard live monitor`, 'success');
   }
 
   function removeFromMonitor(symbol: string) {

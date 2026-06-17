@@ -94,6 +94,26 @@ def _value(stock, *keys, default=""):
     return default
 
 
+def _float_value(stock, *keys, default=0.0):
+    try:
+        return float(_value(stock, *keys, default=default) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _scan_mode_text(scan_mode):
+    return str(scan_mode or "").strip().lower().replace("_", "-")
+
+
+def _is_intraday_scan(scan_mode):
+    mode = _scan_mode_text(scan_mode)
+    return "intraday" in mode or "premarket" in mode or "market-open" in mode
+
+
+def _is_swing_scan(scan_mode):
+    return "swing" in _scan_mode_text(scan_mode)
+
+
 def _derive_action_signal(stock):
     premarket_action = str(_value(stock, "premarket_action", "Premarket Action", default="") or "").upper()
     if premarket_action in ["BUY", "SELL"]:
@@ -133,6 +153,41 @@ def _derive_action_signal(stock):
     return ""
 
 
+def _derive_report_action(stock, scan_mode=None):
+    direct = str(_value(
+        stock,
+        "premarket_action",
+        "action",
+        "ai_rating",
+        "recommendation",
+        "signal",
+        "trade_type",
+        default="",
+    ) or "").upper()
+    if any(token in direct for token in ("STRONG BUY", "BUY", "LONG")):
+        return "BUY"
+    if any(token in direct for token in ("SELL", "SHORT")):
+        return "SELL"
+    if any(token in direct for token in ("AVOID", "HOLD", "WATCH")):
+        return direct
+
+    score = _float_value(stock, "score", "technical_score", "final_ai_score", default=0)
+    confidence = _float_value(stock, "confidence_pct", "confidence", default=0)
+    ml_probability = _float_value(stock, "ml_probability", "ml_score", default=0)
+    expected_return = _float_value(stock, "expected_return", default=0)
+    risk_reward = _float_value(stock, "risk_reward", "rrr", default=0)
+
+    if _is_intraday_scan(scan_mode):
+        if ml_probability >= 60 or confidence >= 55 or score >= 12 or expected_return >= 1.5:
+            return "BUY"
+    if _is_swing_scan(scan_mode):
+        if risk_reward >= 1.5 or expected_return >= 4 or ml_probability >= 58 or confidence >= 55:
+            return "BUY"
+    if ml_probability >= 60 or confidence >= 60 or score >= 15:
+        return "BUY"
+    return "WATCH"
+
+
 def _derive_horizon(stock):
     best_horizon = str(_value(stock, "best_horizon", "Best Horizon", default="") or "")
     if best_horizon in ["Intraday", "Swing"]:
@@ -150,6 +205,14 @@ def _derive_horizon(stock):
         return "Intraday"
 
     return "Swing 1-2 Days"
+
+
+def _derive_report_category(stock, scan_mode=None):
+    if _is_intraday_scan(scan_mode):
+        return "Intraday"
+    if _is_swing_scan(scan_mode):
+        return "Swing 1-2 Days"
+    return _derive_horizon(stock)
 
 
 def _build_clear_reason(stock):
@@ -224,6 +287,92 @@ def build_clear_trade_report(ranked_results):
     }
 
 
+def _sort_report_rows(rows):
+    if not rows:
+        return rows
+    df = pd.DataFrame(rows)
+    sort_columns = [
+        column
+        for column in [
+            "Report Score",
+            "ML Probability",
+            "Expected Return",
+            "Risk Reward",
+            "Profitability Score",
+            "Confidence",
+            "Score",
+        ]
+        if column in df.columns
+    ]
+    if sort_columns:
+        df = df.sort_values(by=sort_columns, ascending=False)
+    df.insert(0, "Rank", range(1, len(df) + 1))
+    return df.to_dict(orient="records")
+
+
+def build_scan_type_report(candidate_results, scan_mode=None):
+    rows = []
+    for stock in candidate_results or []:
+        category = _derive_report_category(stock, scan_mode)
+        ml_probability = _float_value(stock, "ml_probability", "ML Probability", default=0)
+        confidence = _float_value(stock, "confidence_pct", "Confidence", default=0)
+        expected_return = _float_value(stock, "expected_return", "Expected Return", default=0)
+        risk_reward = _float_value(stock, "risk_reward", "Risk Reward", default=0)
+        profitability = _float_value(stock, "profitability_score", "Profitability Score", default=0)
+        technical = _float_value(stock, "technical_score", "Technical Score", "score", "Score", default=0)
+        data_quality = _float_value(stock, "data_reliability_score", "Data Reliability Score", default=0)
+        report_score = (
+            ml_probability * 0.28
+            + confidence * 0.18
+            + profitability * 0.18
+            + technical * 0.16
+            + max(expected_return, 0) * 1.2
+            + min(max(risk_reward, 0), 5) * 4
+            + data_quality * 0.08
+        )
+        rows.append({
+            "Category": category,
+            "Action": _derive_report_action(stock, scan_mode),
+            "Stock": _value(stock, "stock", "symbol", "Stock"),
+            "Sector": _value(stock, "sector", "Sector"),
+            "Industry": _value(stock, "industry", "Industry"),
+            "Live Price": _value(stock, "live_price", "current_price", "Live Price"),
+            "Entry": _value(stock, "entry", "entry_price", "Entry"),
+            "Stoploss": _value(stock, "stoploss", "stop_loss", "Stoploss"),
+            "Target1": _value(stock, "target1", "target_1", "Target1"),
+            "Target2": _value(stock, "target2", "target_2", "Target2"),
+            "Risk Reward": risk_reward,
+            "Stop Distance %": _value(stock, "stop_distance_pct", "Stop Distance %"),
+            "Expected Return": expected_return,
+            "Report Score": round(report_score, 2),
+            "Score": _value(stock, "score", "Score"),
+            "Technical Score": technical,
+            "Confidence": confidence,
+            "ML Probability": ml_probability,
+            "Profitability Score": profitability,
+            "Data Reliability Score": data_quality,
+            "Best Horizon": _value(stock, "best_horizon", "Best Horizon", default=category),
+            "Pattern": _value(stock, "pattern", "setup_type", "Setup Type"),
+            "Reason": _build_clear_reason(stock),
+        })
+
+    sorted_rows = _sort_report_rows(rows)
+    report_df = pd.DataFrame(sorted_rows)
+    if report_df.empty:
+        report_df = pd.DataFrame(columns=[
+            "Rank", "Category", "Action", "Stock", "Sector", "Live Price",
+            "Entry", "Stoploss", "Target1", "Target2", "Risk Reward",
+            "Expected Return", "Report Score", "Reason",
+        ])
+    intraday_df = report_df[report_df["Category"] == "Intraday"].copy() if "Category" in report_df else pd.DataFrame()
+    swing_df = report_df[report_df["Category"] == "Swing 1-2 Days"].copy() if "Category" in report_df else pd.DataFrame()
+    return {
+        "Best_Stocks": report_df,
+        "Intraday": intraday_df,
+        "Swing_1_2_Days": swing_df,
+    }
+
+
 def _market_open_value(stock, *path, default=None):
     value = stock
     for key in path:
@@ -267,17 +416,19 @@ def generate_scan_report(
     filtered_results=None,
     top_results=None,
     final_results=None,
+    scan_mode=None,
 ):
     """
     Generate final scanner report.
     """
 
     try:
-        clear_report = build_clear_trade_report(ranked_results)
         all_rows = all_results if all_results is not None else ranked_results
         filtered_rows = filtered_results if filtered_results is not None else ranked_results
         top_rows = top_results if top_results is not None else ranked_results
         final_rows = final_results if final_results is not None else ranked_results
+        scan_type_rows = final_rows or top_rows or filtered_rows or ranked_results or all_rows
+        clear_report = build_scan_type_report(scan_type_rows, scan_mode=scan_mode)
 
         filepath = export_to_excel(
             {

@@ -11,6 +11,7 @@ import { useRealtime } from '@/hooks/useRealtime';
 import { useToast } from '@/components/layout/ToastProvider';
 import StockGrid from '@/components/molecules/LazyStockGrid';
 import { TerminalPanel } from '@/components/terminal/TerminalPrimitives';
+import { addStocksToLiveMonitor, LIVE_MONITOR_EVENT, normalizeMonitorSymbol, readLiveMonitorRows, writeLiveMonitorRows } from '@/lib/liveMonitor';
 
 type SortMode = 'Profitability' | 'Growth' | 'Value' | 'Momentum' | 'AI Score';
 type MonitorRow = {
@@ -54,9 +55,7 @@ export default function DashboardPage() {
   const visibleQuotesRefreshingRef = React.useRef(false);
 
   function normalizeSymbolToken(value: string) {
-    const cleaned = value.trim().replace(/\s+/g, '').toUpperCase();
-    if (!cleaned) return '';
-    return cleaned.includes('.') ? cleaned : `${cleaned}.NS`;
+    return normalizeMonitorSymbol(value);
   }
 
   function parseSymbols(value: string) {
@@ -108,7 +107,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     try {
-      const saved = JSON.parse(window.localStorage.getItem('dashboard-live-monitor') || '[]');
+      const saved = readLiveMonitorRows();
       if (Array.isArray(saved)) {
         monitorHydratingRef.current = true;
         monitorRowsRef.current = saved;
@@ -119,6 +118,14 @@ export default function DashboardPage() {
     } finally {
       monitorStorageReadyRef.current = true;
     }
+    function handleExternalMonitorUpdate(event: Event) {
+      const rows = (event as CustomEvent).detail?.rows || readLiveMonitorRows();
+      if (!Array.isArray(rows)) return;
+      monitorRowsRef.current = rows;
+      setMonitorRows(rows);
+    }
+    window.addEventListener(LIVE_MONITOR_EVENT, handleExternalMonitorUpdate);
+    return () => window.removeEventListener(LIVE_MONITOR_EVENT, handleExternalMonitorUpdate);
   }, []);
 
   useEffect(() => {
@@ -128,7 +135,7 @@ export default function DashboardPage() {
       monitorRowsRef.current = monitorRows;
       return;
     }
-    window.localStorage.setItem('dashboard-live-monitor', JSON.stringify(monitorRows));
+    writeLiveMonitorRows(monitorRows);
     monitorRowsRef.current = monitorRows;
   }, [monitorRows]);
 
@@ -163,14 +170,15 @@ export default function DashboardPage() {
           return next;
         });
         toast?.push(`Telegram alert sent: ${row.symbol} ${status.label}`, 'success');
-      } catch {
+      } catch (error: any) {
+        const message = error?.message || 'Telegram failed. Check Telegram settings.';
         failedAlertKeys.current.add(key);
         setMonitorRows((current) => {
-          const next = current.map((item) => item.symbol === row.symbol ? { ...item, telegram_status: 'Telegram failed. Check bot/chat settings.' } : item);
+          const next = current.map((item) => item.symbol === row.symbol ? { ...item, telegram_status: message } : item);
           monitorRowsRef.current = next;
           return next;
         });
-        toast?.push(`Telegram alert failed for ${row.symbol}. Check Telegram settings.`, 'error');
+        toast?.push(`Telegram alert failed for ${row.symbol}: ${message}`, 'error');
       }
     });
   }
@@ -356,14 +364,11 @@ export default function DashboardPage() {
       target1: undefined,
       target2: undefined,
     }));
-    setMonitorRows((current) => {
-      const existing = new Set(current.map((row) => row.symbol));
-      const next = [...additions.filter((row) => !existing.has(row.symbol)), ...current];
-      monitorRowsRef.current = next;
-      return next;
-    });
+    const result = addStocksToLiveMonitor(additions, 'dashboard');
+    monitorRowsRef.current = result.rows;
+    setMonitorRows(result.rows);
     setMonitorInput(symbols.join(', '));
-    toast?.push(`${symbols.length} symbol(s) added to live monitor`, 'success');
+    toast?.push(`${result.added || symbols.length} symbol(s) added to live monitor`, 'success');
   }
 
   function updateMonitor(symbol: string, patch: Partial<MonitorRow>) {
@@ -465,6 +470,7 @@ export default function DashboardPage() {
                     <label><span>Target 2</span><input type="number" value={row.target2 ?? ''} onChange={(event) => updateMonitor(row.symbol, { target2: Number(event.target.value) || undefined })} /></label>
                     <label className="live-monitor-toggle"><span>Telegram</span><input type="checkbox" checked={row.telegram} onChange={(event) => updateMonitor(row.symbol, { telegram: event.target.checked })} /></label>
                     <span className={`status-badge ${status.tone}`}>{status.label}</span>
+                    {row.telegram_status && <small className={/failed|missing|error|invalid|forbidden|unauthorized/i.test(row.telegram_status) ? 'status-bad' : 'status-good'}>{row.telegram_status}</small>}
                     <button className="btn-secondary" type="button" onClick={() => saveMonitorAlert(row)}>Save</button>
                     <button className="icon-button" type="button" title="Remove monitor" onClick={() => removeMonitor(row.symbol)}>×</button>
                   </div>

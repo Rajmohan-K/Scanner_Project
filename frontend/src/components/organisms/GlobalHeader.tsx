@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Activity, FileText, LayoutDashboard, LineChart, Radar, Settings, ShieldCheck, Star, Target } from 'lucide-react';
+import { Activity, Bell, FileText, LayoutDashboard, LineChart, Radar, Settings, ShieldCheck, Star, Target } from 'lucide-react';
 import { getActiveScanLabel, useActiveScanStatus } from '@/hooks/useActiveScanStatus';
 
 const navItems = [
@@ -14,6 +14,7 @@ const navItems = [
   ['Swing Scanner', '/swing', LineChart],
   ['AI Insights', '/ai-insights', Target],
   ['Reports', '/reports', FileText],
+  ['Notifications', '/notifications', Bell],
   ['Backtesting', '/scan-center', Activity],
   ['Settings', '/settings', Settings],
 ] as const;

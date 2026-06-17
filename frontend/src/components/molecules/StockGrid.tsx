@@ -1,6 +1,6 @@
 "use client";
 import React, { memo, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, ArrowRight, ArrowRightLeft, BarChart3, FileDown, GitCompare, Pin, Star, Telescope } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowRightLeft, BarChart3, BellPlus, FileDown, GitCompare, Pin, Star, Telescope } from 'lucide-react';
 import { useDispatch } from 'react-redux';
 import { addSymbol } from '@/state/watchlistSlice';
 import { addV20WatchlistItem } from '@/lib/api';
@@ -8,6 +8,7 @@ import { StockRecord } from './StockCard';
 import Skeleton from '@/components/atoms/Skeleton';
 import { EmptyState } from '@/components/terminal/TerminalPrimitives';
 import { useToast } from '@/components/layout/ToastProvider';
+import { addStocksToLiveMonitor } from '@/lib/liveMonitor';
 
 const dash = '-';
 const allColumns = [
@@ -199,6 +200,14 @@ function StockGridComponent({
     }
   }
 
+  function addToDashboardMonitor(item: StockRecord) {
+    const symbol = item.symbol || item.stock || dash;
+    if (!symbol || symbol === dash) return;
+    const result = addStocksToLiveMonitor([item], 'stock-grid');
+    const action = result.added ? 'added to' : 'updated in';
+    toast?.push(`${symbol} ${action} dashboard live monitor`, 'success');
+  }
+
   return (
     <div className={`stock-list-table stock-list-table--${density}`} role="table" aria-label="Live stock results">
       <div className="data-grid-toolbar">
@@ -281,6 +290,7 @@ function StockGridComponent({
             {column('Updated', <span data-label="Updated">{item.last_updated || dash}<small>{item.generated_at || ''}</small></span>)}
             {column('Actions', <span data-label="Actions" className="row-actions">
               <button className="icon-button" title="Pin to watchlist" type="button" onClick={(event) => { event.stopPropagation(); pinToWatchlist(symbol); }}><Pin size={15} /></button>
+              <button className="icon-button" title="Add to dashboard live monitor" type="button" onClick={(event) => { event.stopPropagation(); addToDashboardMonitor(item); }}><BellPlus size={15} /></button>
               <button className="icon-button" title="Push to intraday custom scan" type="button" onClick={(event) => { event.stopPropagation(); pushSymbolToScanner('intraday', symbol); }}><ArrowRightLeft size={15} /></button>
               <button className="icon-button" title="Push to swing custom scan" type="button" onClick={(event) => { event.stopPropagation(); pushSymbolToScanner('swing', symbol); }}><Star size={15} /></button>
               <button className="icon-button" title="Add to compare" type="button" onClick={(event) => { event.stopPropagation(); addToCompare(symbol); }}><GitCompare size={15} /></button>

@@ -139,6 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market-open-interval", default="1m", help="Interval used for intraday market-open data")
     parser.add_argument("--notify-telegram", action="store_true", help="Send scan summary and report via Telegram after scan completes")
     parser.add_argument("--telegram-category", default="Premarket", help="Telegram category for scan notifications")
+    parser.add_argument("--scan-mode", default="standard", help="Scan/report mode: intraday, swing, premarket, standard")
     parser.add_argument("--auto-nse-universe", action="store_true")
     parser.add_argument("--refresh-universe", action="store_true")
     parser.add_argument("--universe-output", default="all_symbols.txt")
@@ -1524,7 +1525,15 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
 
-    if results:
+    scan_mode = str(getattr(args, "scan_mode", "") or "").lower()
+    skip_validation = (
+        "intraday" in scan_mode
+        or "premarket" in scan_mode
+        or int(getattr(args, "validation_pool", 0) or 0) <= 0
+        or len(candidate_symbols) <= 3
+    )
+
+    if results and not skip_validation:
         preliminary_df = pd.DataFrame(results).sort_values(
             by=["ml_probability", "profitability_score", "score", "confidence_pct"],
             ascending=False,
@@ -1575,6 +1584,8 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
             )
 
         results = validated_results
+    elif results:
+        logger.info("10. Skipping walk-forward optimization for fast intraday/custom scan.")
 
     logger.info("11. Ranking final results...")
     wait_if_paused("ranking")
@@ -1613,17 +1624,17 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         logger.warning("Using analyzed candidates for tiered report sheets because strict deep filter returned no final candidates.")
 
     quality_results_df = pd.DataFrame(report_candidate_results)
+    filtered_sort_columns = [
+        column
+        for column in ["ml_probability", "premarket_grade", "profitability_score", "score", "confidence_pct"]
+        if column in quality_results_df.columns
+    ]
     filtered_150 = (
-        quality_results_df.sort_values(
-            by=[
-                column
-                for column in ["ml_probability", "premarket_grade", "profitability_score", "score", "confidence_pct"]
-                if column in quality_results_df.columns
-            ],
-            ascending=False,
-        )
-        .head(150)
-        .to_dict(orient="records")
+        (
+            quality_results_df.sort_values(by=filtered_sort_columns, ascending=False)
+            if filtered_sort_columns
+            else quality_results_df
+        ).head(150).to_dict(orient="records")
         if not quality_results_df.empty
         else []
     )
@@ -1635,16 +1646,19 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     ]
     top_25 = (
         top_25_source.sort_values(by=top_25_sort_columns, ascending=False).head(25).to_dict(orient="records")
-        if top_25_sort_columns
+        if top_25_sort_columns and not top_25_source.empty
+        else top_25_source.head(25).to_dict(orient="records")
+        if not top_25_source.empty
         else []
     )
-    final_top_10 = ranked.head(10).to_dict(orient="records") if not ranked.empty else top_25[:10]
+    final_top_10 = ranked.head(10).to_dict(orient="records") if not ranked.empty else (top_25 or filtered_150)[:10]
     report_path = generate_scan_report(
         ranked.to_dict(orient="records"),
         all_results=coarse_df.to_dict(orient="records"),
         filtered_results=filtered_150,
         top_results=top_25,
         final_results=final_top_10,
+        scan_mode=getattr(args, "scan_mode", ""),
     )
     
     logger.info(f"SCAN COMPLETE: {len(ranked)} qualified stocks, report at {report_path}")
@@ -1671,6 +1685,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
             "symbols": symbols,
             "period": args.period,
             "interval": args.interval,
+            "scan_mode": getattr(args, "scan_mode", ""),
             "benchmark": args.benchmark,
             "top_n": args.top_n,
             "candidate_pool": args.candidate_pool,

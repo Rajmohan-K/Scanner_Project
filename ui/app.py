@@ -33,7 +33,7 @@ from ui.storage import (
 )  # noqa: E402
 from ui import v20_store  # noqa: E402
 from data.market_data_provider import get_market_data_provider  # noqa: E402
-from utils.telegram import send_telegram_messages  # noqa: E402
+from utils.telegram import TelegramDeliveryError, send_telegram_messages, telegram_config_status  # noqa: E402
 from utils.logger import logger  # noqa: E402
 
 
@@ -51,6 +51,16 @@ def _namespace_from_payload(payload: dict[str, Any]) -> argparse.Namespace:
         except (TypeError, ValueError):
             logger.warning(f"Ignoring invalid numeric scan payload value for {key}: {value}")
             return None
+
+    def _int_value(key: str, default: int) -> int:
+        value = payload.get(key, default)
+        if value in (None, ""):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            logger.warning(f"Ignoring invalid integer scan payload value for {key}: {value}")
+            return default
 
     symbols_input = payload.get("symbols", [])
     if isinstance(symbols_input, str):
@@ -86,11 +96,12 @@ def _namespace_from_payload(payload: dict[str, Any]) -> argparse.Namespace:
         period=period,
         interval=interval,
         benchmark=payload.get("benchmark", DEFAULT_BENCHMARK),
-        top_n=int(payload.get("top_n", 10) or 10),
-        workers=int(payload.get("workers", 5) or 5),
+        scan_mode=scan_mode,
+        top_n=_int_value("top_n", 10),
+        workers=_int_value("workers", 5),
         symbols_file=payload.get("symbols_file") or None,
-        candidate_pool=int(payload.get("candidate_pool", 150) or 150),
-        validation_pool=int(payload.get("validation_pool", 25) or 25),
+        candidate_pool=_int_value("candidate_pool", 150),
+        validation_pool=_int_value("validation_pool", 25),
         strict_shortlist=bool(payload.get("strict_shortlist", False)),
         min_expected_return_pct=float(payload.get("min_expected_return_pct", 5) or 0),
         min_ml_probability=_float_or_none("min_ml_probability"),
@@ -1025,6 +1036,133 @@ def _query_payload(request: web.Request) -> dict[str, Any]:
     return {key: value for key, value in request.query.items()}
 
 
+def _round_float(value: Any, digits: int = 2, default: float = 0.0) -> float:
+    try:
+        return round(float(value if value is not None else default), digits)
+    except (TypeError, ValueError):
+        return default
+
+
+async def quick_intraday_signal(request: web.Request) -> web.Response:
+    symbol = normalize_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    interval = request.query.get("interval", "5m")
+    if interval not in {"1m", "2m", "5m", "15m", "30m", "60m", "1h"}:
+        interval = "5m"
+    period = "5d" if str(interval).endswith("m") else "30d"
+    try:
+        quote = get_live_quote(symbol, use_cache=False) or {}
+        df = get_stock_data(symbol, period=period, interval=interval)
+        if df is None or df.empty:
+            raise web.HTTPServiceUnavailable(text=f"intraday data unavailable for {symbol}")
+        if hasattr(df.columns, "nlevels") and getattr(df.columns, "nlevels", 1) > 1:
+            if symbol in df.columns.get_level_values(0):
+                df = df[symbol].copy()
+            elif symbol in df.columns.get_level_values(-1):
+                df = df.xs(symbol, axis=1, level=-1).copy()
+            else:
+                df.columns = [
+                    column[-1] if isinstance(column, tuple) else column
+                    for column in df.columns
+                ]
+
+        recent = df.tail(80).copy()
+        close = recent["Close"].astype(float)
+        high = recent["High"].astype(float)
+        low = recent["Low"].astype(float)
+        volume = recent["Volume"].astype(float) if "Volume" in recent else close * 0
+        ltp = _round_float(quote.get("current_price") or close.iloc[-1])
+        previous_close = _round_float(quote.get("previous_close") or close.iloc[-2] if len(close) > 1 else close.iloc[-1])
+        day_open = _round_float(quote.get("open") or recent["Open"].astype(float).iloc[-1])
+        vwap_denominator = float(volume.tail(30).sum() or 0)
+        vwap = (
+            float(((high.tail(30) + low.tail(30) + close.tail(30)) / 3 * volume.tail(30)).sum() / vwap_denominator)
+            if vwap_denominator
+            else float(close.tail(20).mean())
+        )
+        avg_volume = float(volume.tail(30).mean() or 0)
+        current_volume = float(volume.iloc[-1] or 0)
+        volume_ratio = current_volume / avg_volume if avg_volume else 1.0
+        momentum_pct = ((ltp - float(close.iloc[-6])) / float(close.iloc[-6]) * 100) if len(close) >= 6 and close.iloc[-6] else 0.0
+        day_change_pct = ((ltp - previous_close) / previous_close * 100) if previous_close else 0.0
+        breakout_level = float(high.tail(20).max())
+        support = float(low.tail(20).min())
+        atr_proxy = float((high.tail(14) - low.tail(14)).mean() or max(ltp * 0.01, 0.05))
+        bullish = ltp >= vwap and momentum_pct >= 0
+        breakout = ltp >= breakout_level * 0.998
+        score = 50
+        score += 16 if bullish else -8
+        score += 14 if breakout else 0
+        score += min(max(momentum_pct * 3, -12), 18)
+        score += min(max((volume_ratio - 1) * 12, -8), 16)
+        score += 8 if day_change_pct > 0 else -4
+        score = max(0, min(100, score))
+        signal = "BUY" if score >= 65 else "WATCH" if score >= 48 else "AVOID"
+        entry = ltp if signal != "AVOID" else 0
+        stoploss = max(support, entry - (atr_proxy * 1.2)) if entry else 0
+        risk = max(entry - stoploss, atr_proxy, 0.01) if entry else 0
+        target1 = entry + risk if entry else 0
+        target2 = entry + (risk * 2) if entry else 0
+        row = {
+            "stock": symbol,
+            "symbol": symbol,
+            "sector": "Intraday",
+            "live_price": ltp,
+            "last_close": previous_close,
+            "open": day_open,
+            "high": _round_float(high.iloc[-1]),
+            "low": _round_float(low.iloc[-1]),
+            "volume": int(current_volume),
+            "data_timestamp": datetime.now().isoformat(timespec="seconds"),
+            "score": _round_float(score),
+            "technical_score": _round_float(score),
+            "confidence_pct": _round_float(min(95, max(35, score + (volume_ratio * 5)))),
+            "ml_probability": _round_float(min(95, max(30, score + (momentum_pct * 2)))),
+            "profitability_score": _round_float(score),
+            "quality_score": _round_float(min(100, 45 + volume_ratio * 15 + (10 if bullish else 0))),
+            "data_reliability_score": 80,
+            "volume_strength": _round_float(volume_ratio * 50),
+            "breakout_strength": _round_float(80 if breakout else 35),
+            "momentum_score": _round_float(50 + momentum_pct * 5),
+            "trend_score": _round_float(70 if bullish else 40),
+            "risk_score": _round_float(max(10, min(80, (risk / max(entry, 1)) * 1000 if entry else 70))),
+            "signal": signal,
+            "trade_type": "BUY" if signal == "BUY" else "WATCH",
+            "premarket_action": signal,
+            "best_horizon": "Intraday",
+            "setup_type": "VWAP breakout" if breakout else "VWAP momentum" if bullish else "Wait for VWAP reclaim",
+            "trade_reason": (
+                f"{signal}: LTP {ltp}, VWAP {vwap:.2f}, momentum {momentum_pct:.2f}%, "
+                f"volume {volume_ratio:.2f}x, day change {day_change_pct:.2f}%"
+            ),
+            "reason": (
+                f"{signal}: LTP {ltp}, VWAP {vwap:.2f}, momentum {momentum_pct:.2f}%, "
+                f"volume {volume_ratio:.2f}x"
+            ),
+            "entry": _round_float(entry),
+            "entry_price": _round_float(entry),
+            "stoploss": _round_float(stoploss),
+            "stop_loss": _round_float(stoploss),
+            "target1": _round_float(target1),
+            "target2": _round_float(target2),
+            "risk_reward": 2 if entry else 0,
+            "expected_return": _round_float(((target1 - entry) / entry * 100) if entry else 0),
+            "score_breakdown": {
+                "vwap_analysis": {"raw_score": _round_float(ltp - vwap), "vwap": _round_float(vwap)},
+                "breakout_analysis": {"raw_score": 1 if breakout else 0, "level": _round_float(breakout_level)},
+                "volume_analysis": {"raw_score": _round_float(volume_ratio), "avg_volume": int(avg_volume)},
+                "momentum_analysis": {"raw_score": _round_float(momentum_pct)},
+            },
+        }
+        return web.json_response({"status": "ok", "row": row}, dumps=lambda value: json.dumps(value, default=str))
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Quick intraday signal failed for {symbol}: {exc}")
+        raise web.HTTPServiceUnavailable(text=f"quick intraday signal unavailable for {symbol}")
+
+
 async def v20_dashboard(_: web.Request) -> web.Response:
     v20_store.refresh_realtime_snapshot()
     return web.json_response(v20_store.dashboard_payload(), dumps=lambda value: json.dumps(value, default=str))
@@ -1150,13 +1288,36 @@ async def telegram_stock_alert(request: web.Request) -> web.Response:
             f"Target 2: {target2}",
             f"Time: {datetime.now().isoformat(timespec='seconds')}",
         ])
-        send_telegram_messages(category, message)
-        return web.json_response({"status": "ok", "symbol": symbol, "telegram_category": category})
+        result = send_telegram_messages(category, message)
+        return web.json_response({"status": "ok", "symbol": symbol, "telegram_category": category, "telegram": result})
     except web.HTTPException:
         raise
+    except TelegramDeliveryError as exc:
+        logger.warning(f"Telegram stock alert failed: {exc}")
+        return web.json_response({"status": "error", "message": str(exc)}, status=503)
     except Exception as exc:
         logger.error(f"Telegram stock alert failed: {exc}", exc_info=True)
         return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def telegram_status(request: web.Request) -> web.Response:
+    category = request.query.get("category", "Intraday")
+    return web.json_response({"status": "ok", "telegram": telegram_config_status(category)})
+
+
+async def telegram_test(request: web.Request) -> web.Response:
+    try:
+      payload = await request.json()
+    except Exception:
+      payload = {}
+    category = payload.get("telegram_category") or payload.get("category") or "Intraday"
+    message = payload.get("message") or f"Scanner Telegram test: {datetime.now().isoformat(timespec='seconds')}"
+    try:
+        result = send_telegram_messages(category, message)
+        return web.json_response({"status": "ok", "telegram": result})
+    except TelegramDeliveryError as exc:
+        logger.warning(f"Telegram test failed: {exc}")
+        return web.json_response({"status": "error", "message": str(exc), "telegram": telegram_config_status(category)}, status=503)
 
 
 async def v20_portfolio(_: web.Request) -> web.Response:
@@ -1305,6 +1466,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market-open-analysis", market_open_analysis)
     app.router.add_get("/api/candlestick", candlestick_data)
     app.router.add_get("/api/export/watchlist", export_watchlist)
+    app.router.add_get("/api/intraday/quick-signal/{symbol}", quick_intraday_signal)
     app.router.add_get("/api/v20/dashboard", v20_dashboard)
     app.router.add_post("/api/v20/refresh", v20_refresh)
     app.router.add_get("/api/v20/stocks", v20_stocks)
@@ -1317,6 +1479,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/v20/alerts", v20_alerts)
     app.router.add_post("/api/v20/alerts", v20_alerts)
     app.router.add_post("/api/telegram/stock-alert", telegram_stock_alert)
+    app.router.add_get("/api/telegram/status", telegram_status)
+    app.router.add_post("/api/telegram/test", telegram_test)
     app.router.add_get("/api/v20/portfolio", v20_portfolio)
     app.router.add_get("/api/v20/reports", v20_reports)
     app.router.add_get("/api/v20/backtests", v20_backtests)

@@ -222,6 +222,7 @@ export default function ScanCenterPage() {
       toast?.push(`Enter at least one stock for ${selected}`, 'warning');
       return;
     }
+    const isFastIntraday = selected === 'Intraday';
     try {
       const result = await startScan({
         symbols,
@@ -231,9 +232,9 @@ export default function ScanCenterPage() {
         interval: preset.interval || '1d',
         top_n: v4Filters.topN,
         candidate_pool: v4Filters.candidatePool,
-        validation_pool: v4Filters.validationPool,
-        strict_shortlist: true,
-        workers: v4Filters.workers,
+        validation_pool: isFastIntraday ? 0 : v4Filters.validationPool,
+        strict_shortlist: !isFastIntraday,
+        workers: isFastIntraday ? Math.min(3, Math.max(1, symbols.length || 3)) : v4Filters.workers,
         min_expected_return_pct: v4Filters.minExpectedReturnPct,
         min_ml_probability: v4Filters.minMlProbability,
         min_risk_reward: v4Filters.minRiskReward,

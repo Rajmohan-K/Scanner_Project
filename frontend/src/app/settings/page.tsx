@@ -57,6 +57,7 @@ const sectionFields: Record<string, Array<{ key: string; label: string; type: 'c
   ],
   'Notification Configuration': [
     { key: 'notify_telegram', label: 'Telegram Alerts', type: 'checkbox', value: false },
+    { key: 'desktop_alerts_enabled', label: 'Desktop Alerts', type: 'checkbox', value: false },
     { key: 'telegram_category', label: 'Telegram Category', type: 'text', value: 'Premarket' },
     { key: 'notify_scan_complete', label: 'Notify On Scan Complete', type: 'checkbox', value: true },
   ],
@@ -91,6 +92,12 @@ function defaultSettings() {
   );
 }
 
+function syncDesktopAlertSetting(enabled: boolean) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem('scanner-desktop-alerts-enabled', enabled ? 'true' : 'false');
+  window.dispatchEvent(new Event('scanner-desktop-alerts-updated'));
+}
+
 export default function SettingsPage() {
   const dispatch = useDispatch();
   const toast = useToast();
@@ -110,6 +117,7 @@ export default function SettingsPage() {
         setSettingsState(merged);
         setLastSavedSettings(merged);
         applyThemeSettings(merged);
+        syncDesktopAlertSetting(Boolean(merged.desktop_alerts_enabled));
       } catch (err) {
         toast?.push('Unable to load settings; using editable defaults', 'warning');
       } finally {
@@ -125,6 +133,7 @@ export default function SettingsPage() {
       dispatch(setSettings(settings));
       setLastSavedSettings(settings);
       applyThemeSettings(settings);
+      syncDesktopAlertSetting(Boolean(settings.desktop_alerts_enabled));
       toast?.push('Settings saved successfully', 'success');
     } catch (err) {
       toast?.push('Unable to save settings', 'error');
@@ -137,6 +146,21 @@ export default function SettingsPage() {
     dispatch(updateSetting({ key, value }));
     if (['theme_mode', 'accent_color', 'premium_theme', 'dense_layout'].includes(key)) {
       applyThemeSettings(next);
+    }
+    if (key === 'desktop_alerts_enabled') {
+      if (value && 'Notification' in window && window.Notification.permission === 'default') {
+        window.Notification.requestPermission().then((permission) => {
+          const enabled = permission === 'granted';
+        syncDesktopAlertSetting(enabled);
+          if (!enabled) {
+            setSettingsState((current: any) => ({ ...current, desktop_alerts_enabled: false }));
+            dispatch(updateSetting({ key, value: false }));
+            toast?.push('Desktop alerts permission was not granted', 'warning');
+          }
+        });
+      } else {
+        syncDesktopAlertSetting(Boolean(value));
+      }
     }
   }
 
@@ -156,6 +180,7 @@ export default function SettingsPage() {
     setSettingsState(next);
     dispatch(setSettings(next));
     applyThemeSettings(next);
+    syncDesktopAlertSetting(Boolean(next.desktop_alerts_enabled));
     await saveSettings(next);
     setLastSavedSettings(next);
     toast?.push('Default settings restored', 'success');
@@ -165,6 +190,7 @@ export default function SettingsPage() {
     setSettingsState(lastSavedSettings);
     dispatch(setSettings(lastSavedSettings));
     applyThemeSettings(lastSavedSettings);
+    syncDesktopAlertSetting(Boolean(lastSavedSettings.desktop_alerts_enabled));
     toast?.push('Rolled back to last saved settings', 'success');
   }
 
@@ -213,6 +239,7 @@ export default function SettingsPage() {
                 setSettingsState(next);
                 dispatch(setSettings(next));
                 applyThemeSettings(next);
+                syncDesktopAlertSetting(Boolean(next.desktop_alerts_enabled));
                 toast?.push('Settings imported. Save configuration to persist.', 'success');
               } catch {
                 toast?.push('Invalid settings file', 'error');

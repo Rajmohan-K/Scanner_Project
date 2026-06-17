@@ -3,12 +3,13 @@ import React, { useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Activity, Crosshair, Pin, Play, ScanLine, Star, TrendingUp } from 'lucide-react';
 import StockGrid from '@/components/molecules/LazyStockGrid';
-import { getActiveScans, getLatestScanWithResults, getV20Quote, sendTelegramStockAlert, startScan } from '@/lib/api';
+import { getActiveScans, getLatestScanWithResults, getQuickIntradaySignal, getV20Quote, sendTelegramStockAlert, startScan } from '@/lib/api';
 import { useRealtime } from '@/hooks/useRealtime';
 import { setTopStocks } from '@/state/dashboardSlice';
 import { RootState } from '@/state/store';
 import { useToast } from '@/components/layout/ToastProvider';
 import { DataTable, MetricTile, PageHero, TerminalPanel, Toolbar } from '@/components/terminal/TerminalPrimitives';
+import { addStocksToLiveMonitor } from '@/lib/liveMonitor';
 
 export default function IntradayPage() {
   const dispatch = useDispatch();
@@ -25,9 +26,12 @@ export default function IntradayPage() {
   const [interval, setIntervalValue] = useState('15m');
   const [selectedMonitor, setSelectedMonitor] = useState<any[]>([]);
   const [telegramAlerts, setTelegramAlerts] = useState(false);
+  const [quickSignalLoading, setQuickSignalLoading] = useState(false);
+  const [quickSignalError, setQuickSignalError] = useState('');
   const alertedSymbols = React.useRef<Set<string>>(new Set());
   const sourceRef = React.useRef<any[]>([]);
   const visibleQuotesRefreshingRef = React.useRef(false);
+  const lastQuickSignalRef = React.useRef('');
   const [filters, setFilters] = useState({
     sector: 'All',
     industry: 'All',
@@ -47,6 +51,38 @@ export default function IntradayPage() {
   const monitorStorageKey = 'intraday-monitor-symbols';
   const customSymbolsStorageKey = 'custom-intraday-symbols';
 
+  function normalizeSymbolsInput(value: string) {
+    return value
+      .split(/[\s,;]+/)
+      .map((symbol) => {
+        const upper = symbol.trim().toUpperCase();
+        return upper && !upper.includes('.') ? `${upper}.NS` : upper;
+      })
+      .filter(Boolean);
+  }
+
+  async function runQuickIntradaySignal(symbol: string, showToast = false) {
+    const normalized = normalizeSymbolsInput(symbol)[0];
+    if (!normalized) return null;
+    setQuickSignalLoading(true);
+    setQuickSignalError('');
+    try {
+      const payload = await getQuickIntradaySignal(normalized, interval);
+      const row = payload?.row;
+      if (!row) throw new Error('No signal returned');
+      setPushed((current) => [row, ...current.filter((item: any) => symbolOf(item) !== row.symbol && symbolOf(item) !== row.stock)].slice(0, 25));
+      dispatch(setTopStocks([row, ...topStocks.filter((item: any) => symbolOf(item) !== row.symbol && symbolOf(item) !== row.stock)]));
+      if (showToast) toast?.push(`${row.symbol || normalized} quick signal: ${row.signal || row.trade_type}`, 'success');
+      return row;
+    } catch {
+      setQuickSignalError(`Quick intraday signal unavailable for ${normalized}`);
+      if (showToast) toast?.push(`Quick intraday signal unavailable for ${normalized}`, 'error');
+      return null;
+    } finally {
+      setQuickSignalLoading(false);
+    }
+  }
+
   React.useEffect(() => {
     const saved = window.localStorage.getItem(customSymbolsStorageKey);
     if (saved) setCustomSymbols(saved);
@@ -63,6 +99,18 @@ export default function IntradayPage() {
   React.useEffect(() => {
     window.localStorage.setItem(customSymbolsStorageKey, customSymbols);
   }, [customSymbols]);
+
+  React.useEffect(() => {
+    const symbols = normalizeSymbolsInput(customSymbols);
+    if (symbols.length !== 1) return;
+    const symbol = symbols[0];
+    if (symbol === lastQuickSignalRef.current) return;
+    const timer = window.setTimeout(() => {
+      lastQuickSignalRef.current = symbol;
+      runQuickIntradaySignal(symbol);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [customSymbols, interval]);
 
   React.useEffect(() => {
     async function loadLatest() {
@@ -186,7 +234,8 @@ export default function IntradayPage() {
       window.localStorage.setItem(monitorStorageKey, JSON.stringify(next.map(symbolOf).filter(Boolean)));
       return next;
     });
-    toast?.push(`${symbol} added to intraday monitor`, 'success');
+    addStocksToLiveMonitor([{ ...stock, symbol }], 'intraday');
+    toast?.push(`${symbol} added to intraday and dashboard live monitor`, 'success');
   }
 
   function removeFromMonitor(symbol: string) {
@@ -235,13 +284,11 @@ export default function IntradayPage() {
   }, [selectedMonitor, telegramAlerts, toast]);
 
   async function handleRunCustomScan() {
-    const symbols = customSymbols
-      .split(/[\s,]+/)
-      .map((symbol) => {
-        const upper = symbol.trim().toUpperCase();
-        return upper && !upper.includes('.') ? `${upper}.NS` : upper;
-      })
-      .filter(Boolean);
+    const symbols = normalizeSymbolsInput(customSymbols);
+    if (symbols.length === 1) {
+      await runQuickIntradaySignal(symbols[0], true);
+      return;
+    }
     setLoading(true);
     try {
       const started = await startScan({
@@ -252,9 +299,9 @@ export default function IntradayPage() {
         auto_nse_universe: false,
         top_n: 20,
         candidate_pool: Math.max(Number(savedSettings.custom_candidate_pool || 97), symbols.length),
-        validation_pool: Math.max(Number(savedSettings.custom_validation_pool || 35), symbols.length),
-        strict_shortlist: true,
-        workers: 5,
+        validation_pool: 0,
+        strict_shortlist: false,
+        workers: Math.min(3, Math.max(1, symbols.length)),
         min_expected_return_pct: 5,
         min_ml_probability: Number(savedSettings.ml_threshold || 62),
         min_risk_reward: 1.8,
@@ -284,7 +331,7 @@ export default function IntradayPage() {
         metrics={[
           { label: 'Live Candidates', value: String(visibleItems.length), tone: 'good' },
           { label: 'P&L Tracker', value: pnlReady ? 'Connected' : 'Waiting for entry/LTP', tone: pnlReady ? 'good' : 'warn' },
-          { label: 'Feed', value: displayItems.length ? 'Latest intraday custom scan' : 'Waiting', tone: displayItems.length ? 'good' : 'warn' },
+          { label: 'Feed', value: quickSignalLoading ? 'Quick signal running' : displayItems.length ? 'Latest intraday data' : 'Waiting', tone: displayItems.length ? 'good' : 'warn' },
         ]}
       />
 
@@ -322,6 +369,8 @@ export default function IntradayPage() {
             <button className="btn-primary" onClick={handleRunCustomScan}><Play size={15} /> {loading ? 'Start Another' : 'Run Intraday Scan'}</button>
           </div>
         </div>
+        {quickSignalLoading && <p className="small status-good">Analyzing single stock immediately...</p>}
+        {quickSignalError && <p className="small status-bad">{quickSignalError}</p>}
       </TerminalPanel>
 
       <TerminalPanel eyebrow="Selected Monitor" title="Pinned Intraday Watch">

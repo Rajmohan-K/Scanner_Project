@@ -270,6 +270,10 @@ export async function getV20Quote(symbol: string) {
   return liveGet(`/api/v20/quote/${encodeURIComponent(symbol)}`);
 }
 
+export async function getQuickIntradaySignal(symbol: string, interval = '5m') {
+  return liveGet(`/api/intraday/quick-signal/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(interval)}`);
+}
+
 export async function saveV20Scanner(name: string, config: Record<string, unknown>) {
   const response = await client.post('/api/v20/saved-scanners', { name, config });
   clearApiCache();
@@ -301,6 +305,10 @@ export async function createV20PaperTrade(payload: { symbol: string; side: strin
 }
 
 export async function sendTelegramStockAlert(payload: Record<string, unknown>) {
-  const response = await client.post('/api/telegram/stock-alert', payload);
-  return response.data;
+  try {
+    const response = await client.post('/api/telegram/stock-alert', payload);
+    return response.data;
+  } catch (error: any) {
+    throw new Error(error?.response?.data?.message || error?.message || 'Telegram alert failed');
+  }
 }
