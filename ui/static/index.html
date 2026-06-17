@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scanner Command Center</title>
+  <style>
+    :root {
+      --bg: #07111a;
+      --bg-soft: #0d1b26;
+      --panel: rgba(14, 28, 39, 0.82);
+      --panel-strong: rgba(12, 24, 34, 0.96);
+      --line: rgba(150, 184, 205, 0.18);
+      --text: #eef5f7;
+      --muted: #93a8b4;
+      --accent: #f2a93b;
+      --accent-2: #58c1b3;
+      --buy: #4fd18b;
+      --sell: #ff7b73;
+      --watch: #ffd166;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+      --radius: 24px;
+      --radius-sm: 16px;
+      --font-display: "Segoe UI Variable Display", "Trebuchet MS", "Gill Sans", sans-serif;
+      --font-body: "Segoe UI Variable Text", "Candara", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(242, 169, 59, 0.16), transparent 24%),
+        radial-gradient(circle at top right, rgba(88, 193, 179, 0.18), transparent 22%),
+        linear-gradient(135deg, #061018 0%, #091722 42%, #0f2230 100%);
+      font-family: var(--font-body);
+      min-height: 100vh;
+    }
+
+    .shell {
+      width: min(1440px, calc(100% - 32px));
+      margin: 20px auto 36px;
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 18px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      border-radius: var(--radius);
+    }
+
+    .sidebar {
+      padding: 22px;
+      position: sticky;
+      top: 18px;
+      height: fit-content;
+    }
+
+    .brand {
+      margin-bottom: 24px;
+      padding: 20px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, rgba(242,169,59,0.18), rgba(88,193,179,0.10));
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.24em;
+      color: var(--accent);
+      font-size: 11px;
+      margin-bottom: 10px;
+    }
+
+    h1, h2, h3 {
+      font-family: var(--font-display);
+      margin: 0;
+      letter-spacing: 0.01em;
+    }
+
+    h1 { font-size: 34px; line-height: 1.05; }
+    .brand p, .helper, .muted { color: var(--muted); }
+    .brand p { margin: 10px 0 0; line-height: 1.5; }
+
+    .form-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: #a9c0cd;
+      margin-bottom: 8px;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      background: rgba(6, 14, 21, 0.8);
+      color: var(--text);
+      border: 1px solid rgba(165, 194, 214, 0.16);
+      border-radius: 16px;
+      padding: 14px 14px;
+      font: inherit;
+      outline: none;
+      transition: border-color .18s ease, transform .18s ease, background .18s ease;
+    }
+
+    input:focus, select:focus, textarea:focus {
+      border-color: rgba(242, 169, 59, 0.72);
+      transform: translateY(-1px);
+      background: rgba(8, 18, 26, 0.95);
+    }
+
+    textarea { min-height: 110px; resize: vertical; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(5, 12, 18, 0.55);
+      border: 1px solid rgba(165, 194, 214, 0.11);
+      color: var(--muted);
+    }
+
+    .toggle input {
+      width: auto;
+      accent-color: var(--accent);
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    button {
+      border: none;
+      cursor: pointer;
+      font: inherit;
+      border-radius: 18px;
+      padding: 14px 18px;
+      transition: transform .18s ease, box-shadow .18s ease, opacity .18s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+
+    .primary {
+      flex: 1;
+      background: linear-gradient(135deg, #efb14a, #d98e27);
+      color: #081017;
+      font-weight: 700;
+      box-shadow: 0 18px 40px rgba(217, 142, 39, 0.28);
+    }
+
+    .secondary {
+      background: rgba(5, 12, 18, 0.75);
+      color: var(--text);
+      border: 1px solid rgba(165, 194, 214, 0.12);
+    }
+
+    .content {
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero {
+      padding: 22px;
+      min-height: 164px;
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -8% -25% auto;
+      width: 320px;
+      height: 320px;
+      background: radial-gradient(circle, rgba(88,193,179,0.28), transparent 58%);
+      pointer-events: none;
+    }
+
+    .hero-copy {
+      max-width: 720px;
+      z-index: 1;
+    }
+
+    .hero-copy p {
+      margin: 14px 0 0;
+      color: #b8c8d1;
+      line-height: 1.6;
+      max-width: 640px;
+    }
+
+    .hero-meta {
+      min-width: 220px;
+      display: grid;
+      gap: 10px;
+      z-index: 1;
+    }
+
+    .meta-pill {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(5, 12, 18, 0.46);
+      border: 1px solid rgba(165, 194, 214, 0.12);
+    }
+
+    .meta-pill strong {
+      display: block;
+      font-size: 22px;
+      margin-top: 4px;
+    }
+
+    .grid-cards {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      padding: 18px;
+      border-radius: 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .card .kicker {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+    }
+
+    .card .value {
+      font-size: 34px;
+      font-family: var(--font-display);
+      margin-top: 10px;
+    }
+
+    .card .sub {
+      margin-top: 8px;
+      color: #b3c3cb;
+      font-size: 14px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 18px;
+    }
+
+    .table-wrap, .detail-wrap {
+      padding: 18px;
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .section-head p {
+      color: var(--muted);
+      margin: 6px 0 0;
+      font-size: 14px;
+    }
+
+    .table-shell {
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(165, 194, 214, 0.10);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 920px;
+      background: rgba(4, 10, 15, 0.5);
+    }
+
+    th, td {
+      padding: 14px 14px;
+      border-bottom: 1px solid rgba(165, 194, 214, 0.08);
+      text-align: left;
+      font-size: 14px;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: rgba(8, 16, 23, 0.96);
+      color: #b6c8d2;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 11px;
+    }
+
+    tr {
+      transition: background .18s ease;
+      cursor: pointer;
+    }
+
+    tr:hover, tr.active { background: rgba(242, 169, 59, 0.08); }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+
+    .buy { background: rgba(79, 209, 139, 0.14); color: var(--buy); border-color: rgba(79, 209, 139, 0.24); }
+    .sell { background: rgba(255, 123, 115, 0.14); color: var(--sell); border-color: rgba(255, 123, 115, 0.24); }
+    .watch { background: rgba(255, 209, 102, 0.14); color: var(--watch); border-color: rgba(255, 209, 102, 0.24); }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .mini {
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(5, 12, 18, 0.62);
+      border: 1px solid rgba(165, 194, 214, 0.10);
+    }
+
+    .mini .label {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+    }
+
+    .mini .number {
+      font-size: 22px;
+      margin-top: 8px;
+      font-family: var(--font-display);
+    }
+
+    .reason-box, .drivers {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(5, 12, 18, 0.56);
+      border: 1px solid rgba(165, 194, 214, 0.10);
+      color: #d2dce1;
+      line-height: 1.6;
+      margin-bottom: 14px;
+    }
+
+    .drivers-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .driver-item {
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(165, 194, 214, 0.08);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      min-height: 24px;
+    }
+
+    .status::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent-2);
+      box-shadow: 0 0 18px rgba(88,193,179,0.7);
+    }
+
+    .empty {
+      padding: 42px 22px;
+      text-align: center;
+      color: var(--muted);
+      border-radius: 22px;
+      border: 1px dashed rgba(165,194,214,0.16);
+      background: rgba(4, 10, 15, 0.35);
+    }
+
+    @media (max-width: 1180px) {
+      .shell, .workspace { grid-template-columns: 1fr; }
+      .grid-cards { grid-template-columns: repeat(2, 1fr); }
+      .sidebar { position: static; }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 18px, 100%); margin: 10px auto 24px; }
+      .hero { flex-direction: column; }
+      .grid-cards, .metric-grid, .two-col { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; }
+      h1 { font-size: 28px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar panel">
+      <div class="brand">
+        <div class="eyebrow">Pre-Market Command</div>
+        <h1>Scanner Control Room</h1>
+        <p>Run the multi-factor engine, rank qualified setups, and inspect event-driven conviction before the market opens.</p>
+      </div>
+
+      <form id="scan-form" class="form-grid">
+        <div>
+          <label for="symbols">Symbols</label>
+          <textarea id="symbols" name="symbols" placeholder="RELIANCE.NS INFY.NS TCS.NS"></textarea>
+        </div>
+
+        <div class="two-col">
+          <div>
+            <label for="period">History Period</label>
+            <select id="period" name="period">
+              <option value="3mo">3 Months</option>
+              <option value="6mo" selected>6 Months</option>
+              <option value="1y">1 Year</option>
+            </select>
+          </div>
+          <div>
+            <label for="interval">Interval</label>
+            <select id="interval" name="interval">
+              <option value="1d" selected>Daily</option>
+              <option value="1h">Hourly</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div>
+            <label for="top_n">Top Results</label>
+            <input id="top_n" name="top_n" type="number" value="10" min="1" max="100">
+          </div>
+          <div>
+            <label for="workers">Workers</label>
+            <input id="workers" name="workers" type="number" value="5" min="1" max="20">
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div>
+            <label for="candidate_pool">Candidate Pool</label>
+            <input id="candidate_pool" name="candidate_pool" type="number" value="150" min="10" max="500">
+          </div>
+          <div>
+            <label for="validation_pool">Validation Pool</label>
+            <input id="validation_pool" name="validation_pool" type="number" value="25" min="5" max="200">
+          </div>
+        </div>
+
+        <div>
+          <label for="benchmark">Benchmark</label>
+          <input id="benchmark" name="benchmark" value="^NSEI">
+        </div>
+
+        <label class="toggle">
+          <input id="strict_shortlist" name="strict_shortlist" type="checkbox" checked>
+          <span>Strict shortlist for only stronger qualified setups</span>
+        </label>
+
+        <label class="toggle">
+          <input id="auto_nse_universe" name="auto_nse_universe" type="checkbox">
+          <span>Scan auto-generated NSE universe instead of custom symbols</span>
+        </label>
+
+        <div class="actions">
+          <button class="primary" type="submit">Run Premium Scan</button>
+          <button class="secondary" id="load-demo" type="button">Load Watchlist</button>
+        </div>
+      </form>
+    </aside>
+
+    <main class="content">
+      <section class="hero panel">
+        <div class="hero-copy">
+          <div class="eyebrow">Overview</div>
+          <h2>Premium signal workflow for intraday and swing selection</h2>
+          <p>The interface blends ranked signals, event intelligence, market context, and tradability filters into one smooth review screen. Run the scan, shortlist the qualified names, then open each stock to inspect score, event pressure, trade levels, and drivers.</p>
+        </div>
+        <div class="hero-meta">
+          <div class="meta-pill">
+            <span class="muted">Session Status</span>
+            <strong id="session-status">Idle</strong>
+          </div>
+          <div class="meta-pill">
+            <span class="muted">Report Path</span>
+            <strong id="report-path">Not generated</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="grid-cards" id="summary-cards">
+        <div class="card">
+          <div class="kicker">Qualified</div>
+          <div class="value" id="qualified-count">0</div>
+          <div class="sub">Signals that cleared the pre-market gate</div>
+        </div>
+        <div class="card">
+          <div class="kicker">Avg Grade</div>
+          <div class="value" id="avg-grade">0</div>
+          <div class="sub">Average pre-market decision score</div>
+        </div>
+        <div class="card">
+          <div class="kicker">Avg ML</div>
+          <div class="value" id="avg-ml">0</div>
+          <div class="sub">Average blended probability</div>
+        </div>
+        <div class="card">
+          <div class="kicker">Intraday / Swing</div>
+          <div class="value" id="horizon-split">0 / 0</div>
+          <div class="sub">Best horizon distribution</div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="table-wrap panel">
+          <div class="section-head">
+            <div>
+              <h3>Qualified Setups</h3>
+              <p>Sorted by ranking score and pre-market readiness.</p>
+            </div>
+            <div class="status" id="run-status">Waiting for scan</div>
+          </div>
+          <div id="table-region" class="empty">Run a scan to populate the premium shortlist.</div>
+        </div>
+
+        <div class="detail-wrap panel">
+          <div class="section-head">
+            <div>
+              <h3>Setup Detail</h3>
+              <p>Open a stock from the table to inspect why it qualified.</p>
+            </div>
+          </div>
+          <div id="detail-region" class="empty">No stock selected yet.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const form = document.getElementById("scan-form");
+    const tableRegion = document.getElementById("table-region");
+    const detailRegion = document.getElementById("detail-region");
+    const runStatus = document.getElementById("run-status");
+    const sessionStatus = document.getElementById("session-status");
+    const reportPath = document.getElementById("report-path");
+    const loadDemo = document.getElementById("load-demo");
+
+    const summaryEls = {
+      qualified: document.getElementById("qualified-count"),
+      avgGrade: document.getElementById("avg-grade"),
+      avgMl: document.getElementById("avg-ml"),
+      split: document.getElementById("horizon-split"),
+    };
+
+    let latestResults = [];
+    let latestRanked = [];
+    let activeStock = null;
+
+    loadDemo.addEventListener("click", () => {
+      document.getElementById("symbols").value = "RELIANCE.NS INFY.NS TCS.NS HDFCBANK.NS ICICIBANK.NS SBIN.NS LT.NS ADANIENT.NS";
+    });
+
+    function badgeClass(text) {
+      const value = String(text || "").toUpperCase();
+      if (value.includes("BUY")) return "buy";
+      if (value.includes("SELL")) return "sell";
+      return "watch";
+    }
+
+    function safe(value, fallback = "—") {
+      return value === null || value === undefined || value === "" ? fallback : value;
+    }
+
+    function num(value, digits = 2) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed.toFixed(digits) : "—";
+    }
+
+    function renderTable(records) {
+      if (!records.length) {
+        tableRegion.className = "empty";
+        tableRegion.textContent = "Scan completed but no stocks qualified the final ranking filters.";
+        return;
+      }
+
+      const rows = records.map((row, index) => `
+        <tr data-stock="${row.stock}" class="${activeStock === row.stock ? "active" : ""}">
+          <td>${safe(row.rank, index + 1)}</td>
+          <td><strong>${safe(row.stock)}</strong></td>
+          <td><span class="badge ${badgeClass(row.premarket_action || row.trade_type)}">${safe(row.premarket_action || row.trade_type)}</span></td>
+          <td>${safe(row.best_horizon)}</td>
+          <td>${num(row.premarket_grade)}</td>
+          <td>${num(row.score)}</td>
+          <td>${num(row.confidence_pct)}</td>
+          <td>${num(row.ml_probability)}</td>
+          <td>${num(row.event_score)}</td>
+          <td>${num(row.risk_reward)}</td>
+        </tr>
+      `).join("");
+
+      tableRegion.className = "table-shell";
+      tableRegion.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Stock</th>
+              <th>Action</th>
+              <th>Horizon</th>
+              <th>Grade</th>
+              <th>Score</th>
+              <th>Confidence</th>
+              <th>ML</th>
+              <th>Event</th>
+              <th>R:R</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+
+      tableRegion.querySelectorAll("tbody tr").forEach((row) => {
+        row.addEventListener("click", () => {
+          activeStock = row.dataset.stock;
+          const record = latestResults.find(item => item.stock === activeStock) || latestRanked.find(item => item.stock === activeStock);
+          renderTable(latestRanked);
+          renderDetail(record);
+        });
+      });
+    }
+
+    function renderDetail(stock) {
+      if (!stock) {
+        detailRegion.className = "empty";
+        detailRegion.textContent = "No stock selected yet.";
+        return;
+      }
+
+      const topDrivers = Array.isArray(stock.top_drivers) ? stock.top_drivers : [];
+      const driverMarkup = topDrivers.length ? topDrivers.map(driver => `
+        <div class="driver-item">
+          <strong>${safe(driver.module).replaceAll("_", " ")}</strong><br>
+          Score ${num(driver.score)} | ${safe(driver.reason)}
+        </div>
+      `).join("") : `<div class="driver-item">No top drivers captured for this setup.</div>`;
+
+      detailRegion.className = "";
+      detailRegion.innerHTML = `
+        <div class="metric-grid">
+          <div class="mini"><div class="label">Stock</div><div class="number">${safe(stock.stock)}</div></div>
+          <div class="mini"><div class="label">Premarket Action</div><div class="number">${safe(stock.premarket_action)}</div></div>
+          <div class="mini"><div class="label">Entry / Stop</div><div class="number">${num(stock.entry)} / ${num(stock.stoploss)}</div></div>
+          <div class="mini"><div class="label">Targets</div><div class="number">${num(stock.target1)} / ${num(stock.target2)}</div></div>
+          <div class="mini"><div class="label">ML / Confidence</div><div class="number">${num(stock.ml_probability)} / ${num(stock.confidence_pct)}</div></div>
+          <div class="mini"><div class="label">Event / Context</div><div class="number">${num(stock.event_score)} / ${num(stock.market_context_score)}</div></div>
+        </div>
+
+        <div class="reason-box">
+          <strong>Trade Reason</strong><br>
+          ${safe(stock.trade_reason)}
+        </div>
+
+        <div class="reason-box">
+          <strong>Premarket Notes</strong><br>
+          ${safe(stock.premarket_reasons)}<br><br>
+          Earnings: ${safe(stock.earnings_date)} | Days to earnings: ${safe(stock.days_to_earnings)}<br>
+          Block deals: ${safe(stock.block_deal_count, 0)} | Geopolitical headlines: ${safe(stock.geopolitical_headlines, 0)} | FII source: ${safe(stock.fii_source)}
+        </div>
+
+        <div class="drivers">
+          <strong>Top Drivers</strong>
+          <div class="drivers-list">${driverMarkup}</div>
+        </div>
+      `;
+    }
+
+    function updateSummary(summary, payload) {
+      summaryEls.qualified.textContent = safe(summary.qualified, 0);
+      summaryEls.avgGrade.textContent = num(summary.avg_premarket_grade);
+      summaryEls.avgMl.textContent = num(summary.avg_ml_probability);
+      summaryEls.split.textContent = `${safe(summary.intraday_ready, 0)} / ${safe(summary.swing_ready, 0)}`;
+      sessionStatus.textContent = `${safe(payload.symbols_scanned, 0)} symbols scanned`;
+      reportPath.textContent = safe(payload.report_path, "No report generated");
+    }
+
+    async function runScan(payload) {
+      runStatus.textContent = "Running scan";
+      sessionStatus.textContent = "Processing";
+      tableRegion.className = "empty";
+      tableRegion.textContent = "Scanner running. Building candidates, validating event signals, and ranking setups...";
+      detailRegion.className = "empty";
+      detailRegion.textContent = "Detail will appear when ranked results arrive.";
+
+      const response = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Scan request failed with ${response.status}`);
+      }
+
+      return response.json();
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const payload = {
+        symbols: document.getElementById("symbols").value,
+        period: document.getElementById("period").value,
+        interval: document.getElementById("interval").value,
+        top_n: document.getElementById("top_n").value,
+        workers: document.getElementById("workers").value,
+        candidate_pool: document.getElementById("candidate_pool").value,
+        validation_pool: document.getElementById("validation_pool").value,
+        benchmark: document.getElementById("benchmark").value,
+        strict_shortlist: document.getElementById("strict_shortlist").checked,
+        auto_nse_universe: document.getElementById("auto_nse_universe").checked,
+      };
+
+      try {
+        const payloadOut = await runScan(payload);
+        latestResults = payloadOut.results || [];
+        latestRanked = payloadOut.ranked || [];
+        activeStock = latestRanked[0]?.stock || latestResults[0]?.stock || null;
+
+        updateSummary(payloadOut.summary || {}, payloadOut);
+        renderTable(latestRanked);
+        renderDetail(latestResults.find(item => item.stock === activeStock) || latestRanked[0]);
+        runStatus.textContent = payloadOut.message || "Scan completed";
+      } catch (error) {
+        runStatus.textContent = "Scan failed";
+        sessionStatus.textContent = "Error";
+        tableRegion.className = "empty";
+        tableRegion.textContent = error.message;
+        detailRegion.className = "empty";
+        detailRegion.textContent = "Fix the issue and run again.";
+      }
+    });
+  </script>
+</body>
+</html>

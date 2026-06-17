@@ -1,0 +1,11 @@
+pandas
+numpy
+yfinance
+ta
+textblob
+newsapi-python
+requests
+openpyxl
+aiohttp
+apscheduler>=3.10.0
+pyinstaller>=6.0.0

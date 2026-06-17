@@ -1,0 +1,107 @@
+"use client";
+import React, { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { Activity, FileText, LayoutDashboard, LineChart, Radar, Settings, ShieldCheck, Star, Target } from 'lucide-react';
+import { getActiveScanLabel, useActiveScanStatus } from '@/hooks/useActiveScanStatus';
+
+const navItems = [
+  ['Dashboard', '/dashboard', LayoutDashboard],
+  ['Market Overview', '/premarket', Activity],
+  ['Stock Scanner', '/scan-center', Radar],
+  ['Watchlist', '/watchlist', Star],
+  ['Intraday Screener', '/intraday', ShieldCheck],
+  ['Swing Scanner', '/swing', LineChart],
+  ['AI Insights', '/ai-insights', Target],
+  ['Reports', '/reports', FileText],
+  ['Backtesting', '/scan-center', Activity],
+  ['Settings', '/settings', Settings],
+] as const;
+
+function getIstMarketStatus(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(now);
+  const value = (type: string) => parts.find((part) => part.type === type)?.value || '';
+  const weekday = value('weekday');
+  const hour = Number(value('hour'));
+  const minute = Number(value('minute'));
+  const total = hour * 60 + minute;
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+  let label = 'Closed';
+  let tone = 'closed';
+  if (!isWeekend && total >= 9 * 60 && total < 9 * 60 + 15) {
+    label = 'Pre-market';
+    tone = 'premarket';
+  } else if (!isWeekend && total >= 9 * 60 + 15 && total < 15 * 60 + 30) {
+    label = 'Open';
+    tone = 'open';
+  } else if (!isWeekend && total >= 15 * 60 + 30 && total < 16 * 60) {
+    label = 'Post-market';
+    tone = 'postmarket';
+  }
+  const displayTime = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(now);
+  return { label, tone, displayTime };
+}
+
+export function GlobalHeader() {
+  const pathname = usePathname();
+  const { activeCount, primaryScan, loading, error } = useActiveScanStatus(1000);
+  const scanStatus = String(primaryScan?.status || (activeCount ? 'running' : 'idle')).toLowerCase();
+  const scanLabel = getActiveScanLabel(primaryScan);
+  const scanStatusText = loading
+    ? 'Syncing with backend'
+    : error || (activeCount ? `${scanStatus} / ${activeCount} active` : 'Ready for next scan');
+  const [mounted, setMounted] = useState(false);
+  const [clock, setClock] = useState(() => ({ label: 'Market', tone: 'closed', displayTime: '--:--:--' }));
+  const marketTitle = useMemo(() => `${clock.label} / IST ${clock.displayTime}`, [clock]);
+
+  useEffect(() => {
+    setMounted(true);
+    setClock(getIstMarketStatus());
+    const timer = window.setInterval(() => setClock(getIstMarketStatus()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <header className="global-header">
+      <div className="sidebar-brand-row">
+        <Link href="/dashboard" className="brand">
+          <span className="brand-orb">V2.0</span>
+          <strong>Scanner</strong>
+          <em className={`market-status market-status--${clock.tone}`} title={marketTitle} suppressHydrationWarning>
+            {mounted ? clock.label : 'Market'} <small suppressHydrationWarning>{mounted ? clock.displayTime : '--:--:--'}</small>
+          </em>
+        </Link>
+      </div>
+      <nav className="global-nav" aria-label="Primary navigation">
+        {navItems.map(([label, href, Icon]) => (
+          <Link key={`${label}-${href}`} href={href} className={pathname === href ? 'active' : ''}>
+            <Icon size={17} />
+            <span>{label}</span>
+            {label === 'Stock Scanner' && <b className="nav-badge">LIVE</b>}
+          </Link>
+        ))}
+      </nav>
+      <div className={`sidebar-scan-status ${activeCount ? 'is-running' : ''}`}>
+        <span>Live Scan Status</span>
+        <strong>{loading ? 'Checking scan status...' : scanLabel}</strong>
+        <small>{scanStatusText}</small>
+        <Link href="/scan-center">{activeCount ? 'View / Stop Scan' : 'Open Scan Center'}</Link>
+      </div>
+    </header>
+  );
+}
+
+export default GlobalHeader;
