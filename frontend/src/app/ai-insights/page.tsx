@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { Brain, RefreshCw, ShieldAlert, Sparkles, Target, TrendingUp } from 'lucide-react';
-import { getV20Dashboard, refreshV20Dashboard } from '@/lib/api';
+import { Brain, ShieldAlert, Sparkles, Target, TrendingUp } from 'lucide-react';
+import { getV20Dashboard } from '@/lib/api';
 import { useToast } from '@/components/layout/ToastProvider';
 import { DataTable, EmptyState, MetricTile, PageHero, TerminalPanel } from '@/components/terminal/TerminalPrimitives';
 
@@ -12,14 +12,13 @@ export default function AiInsightsPage() {
   const [loading, setLoading] = useState(true);
   const loadingRef = React.useRef(false);
 
-  async function load(refresh = false, silent = false) {
+  async function load(silent = false) {
     if (loadingRef.current) return;
     try {
       loadingRef.current = true;
       if (!silent) setLoading(true);
-      const payload = refresh ? await refreshV20Dashboard() : await getV20Dashboard();
+      const payload = await getV20Dashboard();
       setData(payload);
-      if (refresh) toast?.push('Live AI insights refreshed', 'success');
     } catch {
       if (!silent) {
         setData(null);
@@ -33,7 +32,7 @@ export default function AiInsightsPage() {
 
   useEffect(() => {
     load();
-    const timer = window.setInterval(() => load(false, true), 1000);
+    const timer = window.setInterval(() => load(true), 1000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -57,7 +56,6 @@ export default function AiInsightsPage() {
         eyebrow="AI Insights"
         title="Live Intelligence Board"
         description="Backend-generated profitability, momentum, valuation, quality, and risk insights from the current V20 opportunity universe."
-        actions={<button className="btn-primary" type="button" onClick={() => load(true)}><RefreshCw size={16} /> Refresh Insights</button>}
         metrics={[
           { label: 'Insight Cards', value: loading ? 'Loading' : String(insights.length), tone: insights.length ? 'good' : 'warn' },
           { label: 'Ranked Stocks', value: String(stocks.length), tone: stocks.length ? 'good' : 'warn' },

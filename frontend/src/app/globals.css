@@ -1147,6 +1147,11 @@ input[type="checkbox"] {
   font-weight: 800;
 }
 
+.compact-field {
+  min-width: 120px;
+  max-width: 150px;
+}
+
 .tone-good { color: var(--success) !important; }
 .tone-bad { color: var(--danger) !important; }
 .tone-warn { color: var(--warning) !important; }
@@ -2294,6 +2299,23 @@ kbd {
     rgba(255, 255, 255, 0.035);
   border-color: var(--border-strong);
   transform: translateX(2px);
+}
+
+.global-nav a.nav-icon-only {
+  justify-content: flex-start;
+  color: var(--text);
+}
+
+.nav-symbol {
+  min-width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #06130f;
+  background: var(--success);
+  font-size: 0.75rem;
+  font-weight: 950;
 }
 
 .sidebar-footer-card {

@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { PageShell } from '@/components/layout/PageShell';
 import { GlobalHeader } from '@/components/organisms/GlobalHeader';
 import TopMarketBar from '@/components/organisms/TopMarketBar';
+import GrowwAutoScanner from '@/components/organisms/GrowwAutoScanner';
 import ReduxProvider from '@/components/layout/ReduxProvider';
 import ToastProvider from '@/components/layout/ToastProvider';
 
@@ -19,6 +20,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <PageShell>
           <ReduxProvider>
             <ToastProvider>
+              <GrowwAutoScanner />
               <div className="app-frame">
                 <GlobalHeader />
                 <div className="workspace-frame">

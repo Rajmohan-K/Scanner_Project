@@ -636,6 +636,99 @@ def merge_news_items(*groups: list[Any]) -> list[Any]:
     return merged
 
 
+def build_fallback_ranked_candidates(
+    analyzed_results: list[dict[str, Any]],
+    top_n: int,
+    scan_mode: str = "",
+) -> pd.DataFrame:
+    """Rank analyzed rows when strict quality gates remove every candidate.
+
+    This keeps reports useful for intraday/custom scans: failed gates are
+    preserved in quality_filter_reasons, but the best analyzed rows still flow
+    to Excel/UI as WATCH/AVOID candidates instead of returning an empty report.
+    """
+    if not analyzed_results:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(analyzed_results)
+    if df.empty:
+        return pd.DataFrame()
+
+    numeric_defaults = {
+        "score": 0,
+        "confidence_pct": 0,
+        "ml_probability": 0,
+        "profitability_score": 0,
+        "quality_score": 0,
+        "technical_score": 0,
+        "premarket_grade": 0,
+        "expected_return": 0,
+        "risk_reward": 0,
+        "rrr": 0,
+        "data_reliability_score": 0,
+        "profit_factor": 0,
+        "backtest_win_rate": 0,
+        "stop_distance_pct": 0,
+        "risk_score": 0,
+        "max_drawdown": 0,
+    }
+    for column, default in numeric_defaults.items():
+        if column not in df.columns:
+            df[column] = default
+        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(default)
+
+    if "risk_reward" in df.columns and "rrr" in df.columns:
+        df["risk_reward_effective"] = df["risk_reward"].where(df["risk_reward"] > 0, df["rrr"])
+    else:
+        df["risk_reward_effective"] = 0
+
+    if "trade_type" not in df.columns:
+        df["trade_type"] = ""
+    if "action" not in df.columns:
+        df["action"] = ""
+    if "quality_filter_reasons" not in df.columns:
+        df["quality_filter_reasons"] = "Did not meet final quality gate"
+
+    mode = str(scan_mode or "").lower()
+    intraday_weight = 1.25 if "intraday" in mode or "premarket" in mode else 1.0
+    swing_weight = 1.2 if "swing" in mode else 1.0
+    df["ranking_score"] = (
+        df["score"].abs() * 0.18
+        + df["confidence_pct"] * 0.16
+        + df["ml_probability"] * 0.16
+        + df["technical_score"] * 0.14 * intraday_weight
+        + df["premarket_grade"] * 0.12 * intraday_weight
+        + df["profitability_score"] * 0.12 * swing_weight
+        + df["quality_score"] * 0.08
+        + df["expected_return"].clip(lower=0) * 0.45
+        + df["risk_reward_effective"].clip(lower=0) * 6
+        + df["data_reliability_score"] * 0.04
+        + df["profit_factor"].clip(lower=0) * 4
+        + df["backtest_win_rate"] * 0.04
+        - df["stop_distance_pct"].clip(lower=0) * 0.35
+        - df["risk_score"].clip(lower=0) * 0.08
+        - df["max_drawdown"].clip(lower=0) * 0.05
+    )
+
+    def fallback_action(row: pd.Series) -> str:
+        existing = str(row.get("action") or row.get("trade_type") or "").upper()
+        if existing in {"BUY", "SELL", "BUY WATCH", "SELL WATCH", "WATCH", "HOLD", "AVOID"}:
+            return existing
+        if row["ranking_score"] >= 55 and row["confidence_pct"] >= 45:
+            return "WATCH"
+        return "AVOID"
+
+    df["action"] = df.apply(fallback_action, axis=1)
+    df["final_gate_status"] = "Fallback ranked after final quality gate"
+    if "quality_filter_passed" in df.columns:
+        df["quality_filter_passed"] = df["quality_filter_passed"].fillna(False)
+    else:
+        df["quality_filter_passed"] = False
+    df = df.sort_values(by="ranking_score", ascending=False).head(max(int(top_n or 10), 1))
+    df["rank"] = range(1, len(df) + 1)
+    return df
+
+
 def build_insider_data(
     df: pd.DataFrame,
     event_snapshot: dict[str, Any] | None = None,
@@ -1597,7 +1690,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         if result.get("quality_filter_passed", True)
     ]
     if not filter_passed_results:
-        logger.warning("Deep quality filter removed all final candidates.")
+        logger.warning("Deep quality filter removed all strict final candidates; fallback ranking analyzed candidates.")
 
     ranked = rank_stocks(
         filter_passed_results,
@@ -1612,7 +1705,20 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         min_data_reliability_score=getattr(args, "min_data_reliability_score", None),
         min_profitability_score=getattr(args, "min_profitability_score", None),
     )
-    logger.info(f"12. Generating report with {len(ranked)} qualified stocks...")
+    fallback_ranked = False
+    if ranked.empty and results and not getattr(args, "strict_shortlist", False):
+        ranked = build_fallback_ranked_candidates(
+            results,
+            top_n=args.top_n,
+            scan_mode=getattr(args, "scan_mode", ""),
+        )
+        fallback_ranked = not ranked.empty
+        if fallback_ranked:
+            logger.warning(
+                f"Fallback ranking selected {len(ranked)} analyzed candidates because no stock passed every deep quality gate."
+            )
+
+    logger.info(f"12. Generating report with {len(ranked)} ranked stocks...")
 
     wait_if_paused("report generation")
     if callable(should_cancel) and should_cancel():
@@ -1652,8 +1758,9 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         else []
     )
     final_top_10 = ranked.head(10).to_dict(orient="records") if not ranked.empty else (top_25 or filtered_150)[:10]
+    ranked_records = ranked.to_dict(orient="records")
     report_path = generate_scan_report(
-        ranked.to_dict(orient="records"),
+        ranked_records,
         all_results=coarse_df.to_dict(orient="records"),
         filtered_results=filtered_150,
         top_results=top_25,
@@ -1661,14 +1768,22 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         scan_mode=getattr(args, "scan_mode", ""),
     )
     
-    logger.info(f"SCAN COMPLETE: {len(ranked)} qualified stocks, report at {report_path}")
+    final_count_label = "fallback-ranked stocks" if fallback_ranked else "qualified stocks"
+    logger.info(f"SCAN COMPLETE: {len(ranked)} {final_count_label}, report at {report_path}")
     logger.info("=" * 60)
 
     scan_output = {
         "status": "ok",
-        "message": "Scan completed." if not ranked.empty else "Scan completed but no stocks qualified.",
+        "message": (
+            "Scan completed with fallback-ranked analyzed candidates."
+            if fallback_ranked
+            else "Scan completed."
+            if not ranked.empty
+            else "Scan completed but no stocks qualified."
+        ),
         "ranked": ranked,
         "results": results,
+        "fallback_ranked": fallback_ranked,
         "all_stocks_live_data": coarse_df.to_dict(orient="records"),
         "filtered_150": filtered_150,
         "top_25": top_25,

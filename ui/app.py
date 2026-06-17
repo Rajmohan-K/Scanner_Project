@@ -4,11 +4,15 @@ import argparse
 import csv
 import io
 import json
+import re
+import ssl
 import sys
 from collections import defaultdict
 from datetime import datetime
+from html import unescape
 from pathlib import Path
 from typing import Any
+from urllib.request import Request, urlopen
 
 from aiohttp import web
 
@@ -311,6 +315,132 @@ from typing import Dict
 # Structure: {scan_id: {"task": asyncio.Task, "status": str, "result": dict|None, "payload": dict, "cancel_requested": bool}}
 scan_tasks: Dict[str, dict] = {}
 market_widget_cache: dict[str, Any] = {"updated_at": 0.0, "values": None, "refreshing": False}
+groww_intraday_cache: dict[str, Any] = {"updated_at": 0.0, "payload": None}
+
+
+def _groww_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi  # type: ignore
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        logger.warning("certifi CA bundle unavailable; using relaxed SSL context for Groww source fetch only.")
+        return ssl._create_unverified_context()
+
+
+def _load_symbol_universe() -> list[str]:
+    for path in (PROJECT_ROOT / "all_symbols.txt", BASE_DIR / "all_symbols.txt"):
+        if not path.exists():
+            continue
+        try:
+            return [
+                normalize_symbol(line.strip())
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and normalize_symbol(line.strip())
+            ]
+        except Exception as exc:
+            logger.warning(f"Unable to load symbol universe from {path}: {exc}")
+    return []
+
+
+def _symbol_base(symbol: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(symbol).upper().replace(".NS", ""))
+
+
+def _company_to_symbol_candidates(company: str, universe: list[str]) -> list[str]:
+    cleaned = re.sub(r"[^A-Za-z0-9 ]", " ", company).upper()
+    stop_words = {
+        "LIMITED", "LTD", "INDIA", "TECHNOLOGIES", "TECHNOLOGY", "INDUSTRIES",
+        "INDUSTRY", "ENGINEERING", "WORKS", "SERVICES", "CORPORATION", "CO",
+        "COMPANY", "PRIVATE", "PVT", "BANK", "FINANCE", "FINANCIAL",
+    }
+    tokens = [token for token in cleaned.split() if token and token not in stop_words]
+    if not tokens:
+        return []
+
+    scored: list[tuple[int, str]] = []
+    joined = "".join(tokens)
+    for symbol in universe:
+        base = _symbol_base(symbol)
+        score = 0
+        if base == joined:
+            score += 90
+        if tokens[0] and base.startswith(tokens[0][: min(5, len(tokens[0]))]):
+            score += 45
+        score += sum(12 for token in tokens if len(token) >= 3 and token[: min(5, len(token))] in base)
+        if score >= 45:
+            scored.append((score, symbol))
+    return [symbol for _, symbol in sorted(scored, reverse=True)[:3]]
+
+
+def _fetch_groww_intraday_rows(limit: int = 80) -> dict[str, Any]:
+    now = datetime.now().timestamp()
+    cached = groww_intraday_cache.get("payload")
+    if cached and int(cached.get("limit") or 0) >= limit and now - float(groww_intraday_cache.get("updated_at") or 0) < 60:
+        return cached
+
+    url = "https://groww.in/stocks/intraday"
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urlopen(request, timeout=12, context=_groww_ssl_context()) as response:
+        html = response.read().decode("utf-8", errors="ignore")
+
+    text = unescape(re.sub(r"<[^>]+>", "\n", html))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    blacklist = {
+        "Stocks", "Company", "Market price", "Volume", "Today", "Filters", "Apply",
+        "Clear all", "Market cap(Cr)", "Turnover", "RSI", "MACD", "Index", "Sector",
+        "Market Cap", "Sort by high volume", "Price change >1%", "52W Performance",
+    }
+    universe = _load_symbol_universe()
+    rows: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for idx, line in enumerate(lines):
+        if line in blacklist or len(line) < 3 or len(line) > 70:
+            continue
+        if re.search(r"[₹%+,\d]", line):
+            continue
+        if not re.search(r"[A-Za-z]", line):
+            continue
+        if line.lower().startswith(("image:", "invest in", "trade in", "track ", "get ", "start ")):
+            continue
+        lookahead = " ".join(lines[idx + 1: idx + 8])
+        if "₹" not in lookahead:
+            continue
+        name_key = line.upper()
+        if name_key in seen_names:
+            continue
+        candidates = _company_to_symbol_candidates(line, universe)
+        symbol = candidates[0] if candidates else ""
+        seen_names.add(name_key)
+        rows.append({
+            "company": line,
+            "symbol": symbol,
+            "source": url,
+            "resolved": bool(symbol),
+            "candidates": candidates,
+        })
+        if len(rows) >= limit:
+            break
+
+    payload = {
+        "status": "ok",
+        "source": url,
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "limit": limit,
+        "count": len(rows),
+        "resolved_count": sum(1 for row in rows if row.get("resolved")),
+        "rows": rows,
+        "symbols": [row["symbol"] for row in rows if row.get("symbol")],
+    }
+    groww_intraday_cache["updated_at"] = now
+    groww_intraday_cache["payload"] = payload
+    return payload
 
 
 def _scan_type_name(payload: dict[str, Any] | None, fallback: str = "standard") -> str:
@@ -932,6 +1062,26 @@ async def start_scan(request: web.Request) -> web.Response:
     })
 
 
+async def groww_intraday_source(request: web.Request) -> web.Response:
+    try:
+        limit = int(request.query.get("limit", "80") or 80)
+    except ValueError:
+        limit = 80
+    limit = max(5, min(limit, 200))
+    try:
+        payload = await asyncio.to_thread(_fetch_groww_intraday_rows, limit)
+        return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+    except Exception as exc:
+        logger.error(f"Groww intraday source failed: {exc}")
+        return web.json_response({
+            "status": "error",
+            "message": f"Unable to fetch Groww intraday stocks: {exc}",
+            "source": "https://groww.in/stocks/intraday",
+            "rows": [],
+            "symbols": [],
+        }, status=502)
+
+
 async def stop_scan(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
@@ -1444,6 +1594,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/widgets", market_widgets)
     app.router.add_post("/api/scan", scan)
     app.router.add_post("/api/scan/start", start_scan)
+    app.router.add_get("/api/sources/groww/intraday", groww_intraday_source)
     app.router.add_post("/api/scan/stop", stop_scan)
     app.router.add_post("/api/scan/stop-all", stop_all_scans)
     app.router.add_post("/api/scan/pause", pause_scan)

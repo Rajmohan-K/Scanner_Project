@@ -2,21 +2,20 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSelector } from 'react-redux';
-import { Maximize2, Play, RefreshCw, Save, Settings, Square, Sun } from 'lucide-react';
+import { Bell, Maximize2, Play, Save, Settings, Square, Sun } from 'lucide-react';
 import CommandPalette from './CommandPalette';
 import useDarkMode from '@/hooks/useDarkMode';
-import { getV20Indices, refreshV20Dashboard, saveV20Scanner, startScan, stopAllScans } from '@/lib/api';
+import { getV20Indices, saveV20Scanner, startScan, stopAllScans } from '@/lib/api';
 import { useToast } from '@/components/layout/ToastProvider';
 import { getActiveScanLabel, useActiveScanStatus } from '@/hooks/useActiveScanStatus';
 import { RootState } from '@/state/store';
 
 export default function TopMarketBar() {
-  const { toggle, premiumTheme, setPremiumTheme, premiumThemes } = useDarkMode();
+  const { toggle } = useDarkMode();
   const toast = useToast();
   const savedSettings = useSelector((state: RootState) => state.settings.data);
   const [indices, setIndices] = useState<any[]>([]);
   const [loadingIndices, setLoadingIndices] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [scanToggling, setScanToggling] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState('');
   const indicesRef = React.useRef<any[]>([]);
@@ -96,20 +95,6 @@ export default function TopMarketBar() {
     }
   }
 
-  async function handleRefresh() {
-    try {
-      setRefreshing(true);
-      const payload = await refreshV20Dashboard();
-      setIndices(Array.isArray(payload?.indices) ? payload.indices : []);
-      setLastRefreshed(new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }));
-      toast?.push('Live market data refreshed', 'success');
-    } catch {
-      toast?.push('Unable to refresh live market data', 'error');
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
   async function handleFullscreen() {
     try {
       if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
@@ -155,12 +140,9 @@ export default function TopMarketBar() {
         )}
       </div>
       <div className="top-actions">
-        <button className="icon-button" type="button" title="Refresh live data" onClick={handleRefresh} disabled={refreshing}><RefreshCw size={16} /></button>
+        <Link className="icon-button" href="/notifications" title="Alerts and notifications" aria-label="Alerts and notifications"><Bell size={16} /></Link>
         <button className="icon-button" type="button" title="Toggle theme" onClick={toggle}><Sun size={16} /></button>
         <button className="icon-button" type="button" title="Fullscreen" onClick={handleFullscreen}><Maximize2 size={16} /></button>
-        <select value={premiumTheme} onChange={(event) => setPremiumTheme(event.target.value as typeof premiumTheme)} title="Premium theme">
-          {premiumThemes.map((theme) => <option key={theme.id} value={theme.id}>{theme.label}</option>)}
-        </select>
         <button className="btn-secondary" type="button" onClick={handleSaveScan}><Save size={15} /> Save Scan</button>
         {scanRunning && <span className="top-scan-chip" title={scanLabel}>{activeCount} active</span>}
         <button

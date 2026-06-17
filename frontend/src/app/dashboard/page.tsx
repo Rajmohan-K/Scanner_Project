@@ -12,6 +12,7 @@ import { useToast } from '@/components/layout/ToastProvider';
 import StockGrid from '@/components/molecules/LazyStockGrid';
 import { TerminalPanel } from '@/components/terminal/TerminalPrimitives';
 import { addStocksToLiveMonitor, LIVE_MONITOR_EVENT, normalizeMonitorSymbol, readLiveMonitorRows, writeLiveMonitorRows } from '@/lib/liveMonitor';
+import { GROWW_EVENT, readGrowwResults } from '@/lib/growwIntraday';
 
 type SortMode = 'Profitability' | 'Growth' | 'Value' | 'Momentum' | 'AI Score';
 type MonitorRow = {
@@ -44,6 +45,8 @@ export default function DashboardPage() {
   const [showAllNews, setShowAllNews] = useState(false);
   const [monitorInput, setMonitorInput] = useState('');
   const [monitorRows, setMonitorRows] = useState<MonitorRow[]>([]);
+  const [growwRows, setGrowwRows] = useState<any[]>([]);
+  const [growwUpdatedAt, setGrowwUpdatedAt] = useState('');
   const sentAlertKeys = React.useRef<Set<string>>(new Set());
   const failedAlertKeys = React.useRef<Set<string>>(new Set());
   const monitorRowsRef = React.useRef<MonitorRow[]>([]);
@@ -126,6 +129,21 @@ export default function DashboardPage() {
     }
     window.addEventListener(LIVE_MONITOR_EVENT, handleExternalMonitorUpdate);
     return () => window.removeEventListener(LIVE_MONITOR_EVENT, handleExternalMonitorUpdate);
+  }, []);
+
+  useEffect(() => {
+    function syncGrowwResults() {
+      const latest = readGrowwResults();
+      setGrowwRows(latest.rows || []);
+      setGrowwUpdatedAt(latest.updatedAt || '');
+    }
+    syncGrowwResults();
+    window.addEventListener(GROWW_EVENT, syncGrowwResults);
+    window.addEventListener('storage', syncGrowwResults);
+    return () => {
+      window.removeEventListener(GROWW_EVENT, syncGrowwResults);
+      window.removeEventListener('storage', syncGrowwResults);
+    };
   }, []);
 
   useEffect(() => {
@@ -477,6 +495,13 @@ export default function DashboardPage() {
                 );
               }) : <div className="empty-inline">Add stocks to monitor live price, target, stoploss, and Telegram alerts.</div>}
             </div>
+          </TerminalPanel>
+
+          <TerminalPanel eyebrow="Third Party Source" title="Groww Intraday Filtered Stocks" actions={<Link className="link-button" href="/groww-intraday">Configure Auto</Link>}>
+            <p className="small">
+              {growwUpdatedAt ? `Last Groww analysis: ${new Date(growwUpdatedAt).toLocaleString('en-IN')}` : 'No Groww auto analysis yet. Enable it from Groww Source.'}
+            </p>
+            <StockGrid items={growwRows.slice(0, 20)} loading={false} pageSize={10} />
           </TerminalPanel>
 
           <TerminalPanel eyebrow="" title="Top Profitable Stocks">

@@ -10,6 +10,7 @@ import { RootState } from '@/state/store';
 import { useToast } from '@/components/layout/ToastProvider';
 import { DataTable, MetricTile, PageHero, TerminalPanel, Toolbar } from '@/components/terminal/TerminalPrimitives';
 import { addStocksToLiveMonitor } from '@/lib/liveMonitor';
+import { GROWW_EVENT, readGrowwResults } from '@/lib/growwIntraday';
 
 export default function IntradayPage() {
   const dispatch = useDispatch();
@@ -25,6 +26,8 @@ export default function IntradayPage() {
   const [period, setPeriod] = useState('30d');
   const [interval, setIntervalValue] = useState('15m');
   const [selectedMonitor, setSelectedMonitor] = useState<any[]>([]);
+  const [growwRows, setGrowwRows] = useState<any[]>([]);
+  const [growwUpdatedAt, setGrowwUpdatedAt] = useState('');
   const [telegramAlerts, setTelegramAlerts] = useState(false);
   const [quickSignalLoading, setQuickSignalLoading] = useState(false);
   const [quickSignalError, setQuickSignalError] = useState('');
@@ -94,6 +97,21 @@ export default function IntradayPage() {
     }
     window.addEventListener('custom-scanner-symbols', handleCustomSymbols);
     return () => window.removeEventListener('custom-scanner-symbols', handleCustomSymbols);
+  }, []);
+
+  React.useEffect(() => {
+    function syncGrowwResults() {
+      const latest = readGrowwResults();
+      setGrowwRows(latest.rows || []);
+      setGrowwUpdatedAt(latest.updatedAt || '');
+    }
+    syncGrowwResults();
+    window.addEventListener(GROWW_EVENT, syncGrowwResults);
+    window.addEventListener('storage', syncGrowwResults);
+    return () => {
+      window.removeEventListener(GROWW_EVENT, syncGrowwResults);
+      window.removeEventListener('storage', syncGrowwResults);
+    };
   }, []);
 
   React.useEffect(() => {
@@ -399,6 +417,22 @@ export default function IntradayPage() {
       </TerminalPanel>
 
       <div className="terminal-grid intraday-layout">
+        <TerminalPanel eyebrow="Groww Auto Source" title="Groww Intraday Filtered Signals">
+          <p className="small">
+            {growwUpdatedAt ? `Last Groww analysis: ${new Date(growwUpdatedAt).toLocaleString('en-IN')}` : 'No Groww auto analysis yet. Enable it from Groww Source.'}
+          </p>
+          <div className="quick-pick-list">
+            {growwRows.slice(0, 12).map((stock: any) => {
+              const symbol = symbolOf(stock);
+              return (
+                <button key={`groww-${symbol}`} className="choice-card" onClick={() => addToMonitor(stock)}>
+                  <Pin size={14} /> {symbol}
+                </button>
+              );
+            })}
+          </div>
+          <StockGrid items={growwRows} loading={false} />
+        </TerminalPanel>
         <TerminalPanel eyebrow="Section A" title="Latest Intraday Custom Filtered Stocks">
           <Toolbar search={query} setSearch={setQuery} tabs={['Table', 'List']} activeTab={view} onTabChange={setView} />
           <div className="quick-pick-list">

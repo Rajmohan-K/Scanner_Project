@@ -2,21 +2,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Activity, Bell, FileText, LayoutDashboard, LineChart, Radar, Settings, ShieldCheck, Star, Target } from 'lucide-react';
+import { Activity, FileText, LayoutDashboard, LineChart, Radar, ShieldCheck, Star, Target, UploadCloud } from 'lucide-react';
 import { getActiveScanLabel, useActiveScanStatus } from '@/hooks/useActiveScanStatus';
 
 const navItems = [
   ['Dashboard', '/dashboard', LayoutDashboard],
   ['Market Overview', '/premarket', Activity],
   ['Stock Scanner', '/scan-center', Radar],
+  ['Groww Source', '/groww-intraday', UploadCloud],
   ['Watchlist', '/watchlist', Star],
   ['Intraday Screener', '/intraday', ShieldCheck],
   ['Swing Scanner', '/swing', LineChart],
   ['AI Insights', '/ai-insights', Target],
   ['Reports', '/reports', FileText],
-  ['Notifications', '/notifications', Bell],
-  ['Backtesting', '/scan-center', Activity],
-  ['Settings', '/settings', Settings],
 ] as const;
 
 function getIstMarketStatus(now = new Date()) {
@@ -88,7 +86,7 @@ export function GlobalHeader() {
       </div>
       <nav className="global-nav" aria-label="Primary navigation">
         {navItems.map(([label, href, Icon]) => (
-          <Link key={`${label}-${href}`} href={href} className={pathname === href ? 'active' : ''}>
+          <Link key={`${label}-${href}`} href={href} title={label} aria-label={label} className={pathname === href ? 'active' : ''}>
             <Icon size={17} />
             <span>{label}</span>
             {label === 'Stock Scanner' && <b className="nav-badge">LIVE</b>}

@@ -188,6 +188,10 @@ export async function startScan(payload: ScanPayload) {
   return response.data;
 }
 
+export async function getGrowwIntradayStocks(limit = 80) {
+  return liveGet(`/api/sources/groww/intraday?limit=${limit}`);
+}
+
 export async function stopScan(scanId: string) {
   const response = await client.post('/api/scan/stop', { scan_id: scanId });
   clearApiCache();
@@ -246,12 +250,6 @@ export async function saveWatchlistOrder(order: string[]) {
 
 export async function getV20Dashboard() {
   return liveGet('/api/v20/dashboard');
-}
-
-export async function refreshV20Dashboard() {
-  const response = await client.post('/api/v20/refresh');
-  clearApiCache();
-  return response.data;
 }
 
 export async function getV20Indices() {
