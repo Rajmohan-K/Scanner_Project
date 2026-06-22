@@ -6,6 +6,7 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .pytest_tmp/
+tmp_pycache/
 .scanner_cache/
 .vscode/
 .idea/

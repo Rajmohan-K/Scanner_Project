@@ -54,7 +54,7 @@ export function rowFromStock(stock: LiveMonitorInput, source = 'scan'): LiveMoni
     stop_loss: numberOrUndefined(stock.stop_loss ?? stock.stoploss),
     target1: numberOrUndefined(stock.target1 ?? stock.target_1),
     target2: numberOrUndefined(stock.target2 ?? stock.target_2),
-    telegram: stock.telegram ?? true,
+    telegram: stock.telegram ?? false,
     last_updated: new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }),
     source,
   };

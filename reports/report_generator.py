@@ -189,7 +189,14 @@ def _derive_report_action(stock, scan_mode=None):
 
 
 def _derive_horizon(stock):
-    best_horizon = str(_value(stock, "best_horizon", "Best Horizon", default="") or "")
+    best_horizon = str(_value(stock, "best_horizon", "Best Horizon", default="") or "").strip()
+    normalized_horizon = best_horizon.lower().replace("_", " ").replace("-", " ")
+    if normalized_horizon in {"intraday", "day trade", "day trading"}:
+        return "Intraday"
+    if normalized_horizon in {"swing", "swing 1 2 days", "swing 1-2 days", "multi day"}:
+        return "Swing 1-2 Days"
+    if normalized_horizon in {"watchlist", "watch", "hold", "rejected", "avoid"}:
+        return "Watchlist"
     if best_horizon in ["Intraday", "Swing"]:
         return "Intraday" if best_horizon == "Intraday" else "Swing 1-2 Days"
 
@@ -208,11 +215,30 @@ def _derive_horizon(stock):
 
 
 def _derive_report_category(stock, scan_mode=None):
+    row_family = _scan_mode_text(
+        _value(stock, "scan_family", "scanner_bucket", "pipeline_stage", "scan_mode", default="")
+    )
+    if "open-confirmation" in row_family or "open_confirmation" in row_family:
+        return "Intraday"
+    if "premarket" in row_family or "intraday" in row_family:
+        return "Intraday"
+    if "swing" in row_family:
+        return "Swing 1-2 Days"
+    if "watchlist" in row_family:
+        return "Watchlist"
     if _is_intraday_scan(scan_mode):
         return "Intraday"
     if _is_swing_scan(scan_mode):
         return "Swing 1-2 Days"
     return _derive_horizon(stock)
+
+
+def _category_limit(category: str, scan_mode=None) -> int | None:
+    if category == "Intraday" and _is_intraday_scan(scan_mode):
+        return 10
+    if category == "Swing 1-2 Days" and _is_swing_scan(scan_mode):
+        return 10
+    return None
 
 
 def _build_clear_reason(stock):
@@ -366,6 +392,12 @@ def build_scan_type_report(candidate_results, scan_mode=None):
         ])
     intraday_df = report_df[report_df["Category"] == "Intraday"].copy() if "Category" in report_df else pd.DataFrame()
     swing_df = report_df[report_df["Category"] == "Swing 1-2 Days"].copy() if "Category" in report_df else pd.DataFrame()
+    intraday_limit = _category_limit("Intraday", scan_mode)
+    swing_limit = _category_limit("Swing 1-2 Days", scan_mode)
+    if intraday_limit is not None:
+        intraday_df = intraday_df.head(intraday_limit)
+    if swing_limit is not None:
+        swing_df = swing_df.head(swing_limit)
     return {
         "Best_Stocks": report_df,
         "Intraday": intraday_df,

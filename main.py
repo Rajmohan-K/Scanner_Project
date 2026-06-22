@@ -68,6 +68,7 @@ from sentiment.war_analysis import analyze_war_risk
 from trading.signal_engine import generate_signal
 from trading.target_engine import generate_targets
 from trading.trade_engine import generate_signal as generate_trade_signal
+from scanners.router import build_scan_metadata, normalize_scan_mode, scanner_profile, tag_records
 from utils.helpers import normalize_value, validate_dataframe
 from utils.logger import logger
 from utils.telegram import send_telegram_messages
@@ -127,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols-file")
     parser.add_argument("--candidate-pool", type=int, default=150)
     parser.add_argument("--validation-pool", type=int, default=25)
+    parser.add_argument("--enable-deep-validation", action="store_true", help="Run slower walk-forward and optimization validation for the selected validation pool")
     parser.add_argument("--strict-shortlist", action="store_true")
     parser.add_argument("--min-expected-return-pct", type=float, default=5.0)
     parser.add_argument("--min-ml-probability", type=float, default=None)
@@ -140,6 +142,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--notify-telegram", action="store_true", help="Send scan summary and report via Telegram after scan completes")
     parser.add_argument("--telegram-category", default="Premarket", help="Telegram category for scan notifications")
     parser.add_argument("--scan-mode", default="standard", help="Scan/report mode: intraday, swing, premarket, standard")
+    parser.add_argument("--pipeline-stage", default="", help="Dedicated scanner pipeline stage")
     parser.add_argument("--auto-nse-universe", action="store_true")
     parser.add_argument("--refresh-universe", action="store_true")
     parser.add_argument("--universe-output", default="all_symbols.txt")
@@ -1436,6 +1439,16 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     logger.info(f"STARTING SCAN: symbols={args.symbols}, period={args.period}")
     logger.info("=" * 60)
     filter_overrides = build_filter_overrides(args)
+    profile = scanner_profile(getattr(args, "scan_mode", "standard"), getattr(args, "pipeline_stage", None))
+    scan_metadata = build_scan_metadata(profile.mode, profile.stage)
+    setattr(args, "scan_mode", profile.mode)
+    setattr(args, "pipeline_stage", profile.stage)
+    if int(getattr(args, "top_n", 0) or 0) <= 0:
+        setattr(args, "top_n", profile.default_top_n)
+    if int(getattr(args, "candidate_pool", 0) or 0) <= 0:
+        setattr(args, "candidate_pool", profile.default_candidate_pool)
+    if int(getattr(args, "validation_pool", 0) or 0) < 0:
+        setattr(args, "validation_pool", profile.default_validation_pool)
     
     symbols = load_symbols(args)
     # cooperative cancellation: args may expose a `should_cancel()` callable
@@ -1618,9 +1631,11 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
 
-    scan_mode = str(getattr(args, "scan_mode", "") or "").lower()
+    scan_mode = normalize_scan_mode(getattr(args, "scan_mode", ""))
+    deep_validation_enabled = bool(getattr(args, "enable_deep_validation", False))
     skip_validation = (
-        "intraday" in scan_mode
+        not deep_validation_enabled
+        or "intraday" in scan_mode
         or "premarket" in scan_mode
         or int(getattr(args, "validation_pool", 0) or 0) <= 0
         or len(candidate_symbols) <= 3
@@ -1631,21 +1646,22 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
             by=["ml_probability", "profitability_score", "score", "confidence_pct"],
             ascending=False,
         )
-        validation_symbols = set(
-            preliminary_df.head(max(args.top_n, args.validation_pool))["stock"].tolist()
-        )
+        validation_symbols = preliminary_df.head(max(args.top_n, args.validation_pool))["stock"].tolist()
+        validation_symbol_set = set(validation_symbols)
         logger.info(f"10. Validating top {len(validation_symbols)} stocks with walk-forward...")
         validated_results = []
-        for v_idx, result in enumerate(results):
+        validation_idx = 0
+        for result in results:
             wait_if_paused(f"validation {result['stock']}")
             if callable(should_cancel) and should_cancel():
                 logger.info("Scan cancelled during validation phase")
                 return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
-            if result["stock"] not in validation_symbols:
+            if result["stock"] not in validation_symbol_set:
                 validated_results.append(result)
                 continue
 
-            logger.info(f"    Re-analyzing {result['stock']} with optimization ({v_idx + 1}/{len(validation_symbols)})...")
+            validation_idx += 1
+            logger.info(f"    Re-analyzing {result['stock']} with optimization ({validation_idx}/{len(validation_symbols)})...")
             df = stock_frames.get(result["stock"])
             if df is None:
                 validated_results.append(result)
@@ -1678,7 +1694,10 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
 
         results = validated_results
     elif results:
-        logger.info("10. Skipping walk-forward optimization for fast intraday/custom scan.")
+        if deep_validation_enabled:
+            logger.info("10. Skipping walk-forward optimization for fast intraday/custom scan.")
+        else:
+            logger.info("10. Skipping walk-forward optimization because enable_deep_validation is false.")
 
     logger.info("11. Ranking final results...")
     wait_if_paused("ranking")
@@ -1706,7 +1725,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         min_profitability_score=getattr(args, "min_profitability_score", None),
     )
     fallback_ranked = False
-    if ranked.empty and results and not getattr(args, "strict_shortlist", False):
+    if ranked.empty and results:
         ranked = build_fallback_ranked_candidates(
             results,
             top_n=args.top_n,
@@ -1714,8 +1733,9 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         )
         fallback_ranked = not ranked.empty
         if fallback_ranked:
+            strict_note = " Strict shortlist remains failed; rows are review candidates, not strict qualified trades." if getattr(args, "strict_shortlist", False) else ""
             logger.warning(
-                f"Fallback ranking selected {len(ranked)} analyzed candidates because no stock passed every deep quality gate."
+                f"Fallback ranking selected {len(ranked)} analyzed candidates because no stock passed every deep quality gate.{strict_note}"
             )
 
     logger.info(f"12. Generating report with {len(ranked)} ranked stocks...")
@@ -1757,11 +1777,20 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         if not top_25_source.empty
         else []
     )
+    if not ranked.empty:
+        for key in ("scan_mode", "scan_family", "scanner_bucket", "pipeline_stage", "scanner_display_name"):
+            ranked[key] = scan_metadata.get(key)
+
+    filtered_150 = tag_records(filtered_150, scan_metadata)
+    top_25 = tag_records(top_25, scan_metadata)
     final_top_10 = ranked.head(10).to_dict(orient="records") if not ranked.empty else (top_25 or filtered_150)[:10]
-    ranked_records = ranked.to_dict(orient="records")
+    ranked_records = tag_records(ranked.to_dict(orient="records"), scan_metadata)
+    results = tag_records(results, scan_metadata)
+    coarse_records = tag_records(coarse_df.to_dict(orient="records"), scan_metadata)
+    final_top_10 = tag_records(final_top_10, scan_metadata)
     report_path = generate_scan_report(
         ranked_records,
-        all_results=coarse_df.to_dict(orient="records"),
+        all_results=coarse_records,
         filtered_results=filtered_150,
         top_results=top_25,
         final_results=final_top_10,
@@ -1784,10 +1813,11 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         "ranked": ranked,
         "results": results,
         "fallback_ranked": fallback_ranked,
-        "all_stocks_live_data": coarse_df.to_dict(orient="records"),
+        "all_stocks_live_data": coarse_records,
         "filtered_150": filtered_150,
         "top_25": top_25,
         "final_top_10": final_top_10,
+        **scan_metadata,
         "report_path": report_path,
         "symbols_scanned": len(symbols),
         "candidates_considered": len(candidate_symbols),
@@ -1801,10 +1831,14 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
             "period": args.period,
             "interval": args.interval,
             "scan_mode": getattr(args, "scan_mode", ""),
+            "scan_family": scan_metadata["scan_family"],
+            "scanner_bucket": scan_metadata["scanner_bucket"],
+            "pipeline_stage": scan_metadata["pipeline_stage"],
             "benchmark": args.benchmark,
             "top_n": args.top_n,
             "candidate_pool": args.candidate_pool,
             "validation_pool": args.validation_pool,
+            "enable_deep_validation": getattr(args, "enable_deep_validation", False),
             "strict_shortlist": args.strict_shortlist,
             "filter_overrides": filter_overrides,
             "min_expected_return_pct": getattr(args, "min_expected_return_pct", 0),

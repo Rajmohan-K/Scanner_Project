@@ -88,6 +88,59 @@ CREATE TABLE IF NOT EXISTS ai_recommendations (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_recommendations_rating ON ai_recommendations(rating, confidence DESC);
 
+CREATE TABLE IF NOT EXISTS ai_insights (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stock_id INTEGER REFERENCES stocks(id),
+  scan_type TEXT NOT NULL DEFAULT '',
+  insight_type TEXT NOT NULL,
+  recommendation TEXT NOT NULL,
+  confidence_score REAL NOT NULL DEFAULT 0,
+  risk_score REAL NOT NULL DEFAULT 0,
+  opportunity_score REAL NOT NULL DEFAULT 0,
+  summary TEXT NOT NULL,
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  risks_json TEXT NOT NULL DEFAULT '[]',
+  signals_json TEXT NOT NULL DEFAULT '[]',
+  data_freshness TEXT NOT NULL DEFAULT '',
+  generated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_insights_stock ON ai_insights(stock_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_insights_type ON ai_insights(insight_type, generated_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_trade_plans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stock_id INTEGER REFERENCES stocks(id),
+  scan_type TEXT NOT NULL DEFAULT '',
+  trade_type TEXT NOT NULL,
+  entry_zone TEXT NOT NULL DEFAULT '',
+  stop_loss REAL,
+  target1 REAL,
+  target2 REAL,
+  target3 REAL,
+  risk_reward REAL NOT NULL DEFAULT 0,
+  confidence_score REAL NOT NULL DEFAULT 0,
+  setup_type TEXT NOT NULL DEFAULT '',
+  reasoning TEXT NOT NULL DEFAULT '',
+  invalidation_point TEXT NOT NULL DEFAULT '',
+  timeframe TEXT NOT NULL DEFAULT '',
+  generated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_trade_plans_stock ON ai_trade_plans(stock_id, generated_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_user_queries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER REFERENCES users(id),
+  query TEXT NOT NULL,
+  response TEXT NOT NULL,
+  context_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS watchlists (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id),

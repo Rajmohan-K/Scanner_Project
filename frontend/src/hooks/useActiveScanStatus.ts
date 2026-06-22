@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { getActiveScans } from '@/lib/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getActiveScans, getOptimisticActiveScans, SCAN_STATUS_EVENT } from '@/lib/api';
 
 export type ActiveScan = {
   scan_id?: string;
@@ -41,6 +41,16 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs = 3500): Promise<T> {
   });
 }
 
+function mergeActiveScans(serverScans: ActiveScan[], optimisticScans: ActiveScan[]) {
+  const merged = [...serverScans];
+  const serverIds = new Set(serverScans.map((scan) => String(scan.scan_id || scan.id || '')));
+  optimisticScans.forEach((scan) => {
+    const scanId = String(scan.scan_id || scan.id || '');
+    if (scanId && !serverIds.has(scanId)) merged.unshift(scan);
+  });
+  return merged;
+}
+
 export function getActiveScanLabel(scan?: ActiveScan) {
   if (!scan) return 'No active scan';
   const raw = scan.display_name || scan.scan_mode || scan.scan_type || scan.type || 'Live Scan';
@@ -55,16 +65,25 @@ export function useActiveScanStatus(pollMs = 5000) {
   const [activeScans, setActiveScans] = useState<ActiveScan[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const inFlightRef = useRef(false);
+  const failuresRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setLoading(true);
     try {
       const payload = await withTimeout(getActiveScans());
-      setActiveScans(extractActiveScans(payload));
+      failuresRef.current = 0;
+      setActiveScans(mergeActiveScans(extractActiveScans(payload), getOptimisticActiveScans()));
       setError('');
     } catch {
-      setActiveScans([]);
-      setError('Scan status unavailable');
+      failuresRef.current += 1;
+      const optimistic = getOptimisticActiveScans();
+      setActiveScans((current) => (current.length ? mergeActiveScans(current, optimistic) : optimistic));
+      setError(failuresRef.current >= 3 ? 'Scan status unavailable' : '');
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
   }, []);
@@ -76,9 +95,14 @@ export function useActiveScanStatus(pollMs = 5000) {
     };
     load();
     const timer = window.setInterval(load, pollMs);
+    const handleOptimisticStatus = () => setActiveScans((current) => mergeActiveScans(current, getOptimisticActiveScans()));
+    window.addEventListener(SCAN_STATUS_EVENT, handleOptimisticStatus);
+    window.addEventListener('storage', handleOptimisticStatus);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      window.removeEventListener(SCAN_STATUS_EVENT, handleOptimisticStatus);
+      window.removeEventListener('storage', handleOptimisticStatus);
     };
   }, [pollMs, refresh]);
 

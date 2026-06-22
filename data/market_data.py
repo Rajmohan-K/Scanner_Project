@@ -146,14 +146,15 @@ def get_bulk_stock_data(
 
 
 def get_live_quote(symbol, use_cache=True):
+    raw_symbol = symbol
     symbol = normalize_market_symbol(symbol)
     if not symbol:
-        logger.warning(f"Rejected invalid stock symbol for get_live_quote: {symbol}")
+        logger.warning(f"Rejected invalid stock symbol for get_live_quote: {raw_symbol}")
         return {}
+    cache_key = f"{symbol}|quote"
 
     try:
         ensure_yfinance_cache()
-        cache_key = f"{symbol}|quote"
         cached_quote = load_cache("quotes", cache_key, QUOTE_CACHE_TTL) if use_cache else None
         if use_cache and isinstance(cached_quote, dict) and cached_quote:
             return cached_quote.copy()
@@ -207,11 +208,25 @@ def get_live_quote(symbol, use_cache=True):
         return quote
 
     except Exception as e:
-
-        logger.error(
-            f"Live quote failed: {e}"
-        )
-
+        logger.warning(f"Live quote provider failed for {symbol}: {e}")
+        fallback_df = get_stock_data(symbol, period="5d", interval="1d")
+        if fallback_df is not None and not fallback_df.empty:
+            fallback_df = fallback_df.dropna()
+            if not fallback_df.empty:
+                last = fallback_df.iloc[-1]
+                previous = fallback_df.iloc[-2] if len(fallback_df) >= 2 else last
+                quote = {
+                    "current_price": float(last.get("Close", 0) or 0),
+                    "open": float(last.get("Open", 0) or 0),
+                    "previous_close": float(previous.get("Close", 0) or 0),
+                    "day_high": float(last.get("High", 0) or 0),
+                    "day_low": float(last.get("Low", 0) or 0),
+                    "source": "yfinance_history_fallback",
+                    "stale": True,
+                }
+                if use_cache:
+                    save_cache("quotes", cache_key, quote)
+                return quote
         return {}
 
 

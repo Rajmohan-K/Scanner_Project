@@ -17,8 +17,8 @@ def _scan_path(scan_id: str) -> Path:
     return DATA_DIR / f"{scan_id}.json"
 
 
-def save_scan(payload: dict[str, Any]) -> str:
-    scan_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+def save_scan(payload: dict[str, Any], scan_id: str | None = None) -> str:
+    scan_id = scan_id or datetime.now().strftime("%Y%m%d_%H%M%S")
     record = {
         "scan_id": scan_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -47,6 +47,8 @@ def list_scans(limit: int = 30) -> list[dict[str, Any]]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        if not isinstance(payload, dict):
+            continue
         if not payload.get("scan_id") and "results" not in payload and "ranked" not in payload:
             continue
         scans.append(
@@ -55,6 +57,10 @@ def list_scans(limit: int = 30) -> list[dict[str, Any]]:
                 "created_at": payload.get("created_at", ""),
                 "message": payload.get("message", ""),
                 "scan_mode": payload.get("scan_mode", "standard"),
+                "scan_family": payload.get("scan_family", ""),
+                "scanner_bucket": payload.get("scanner_bucket", ""),
+                "pipeline_stage": payload.get("pipeline_stage", ""),
+                "scanner_display_name": payload.get("scanner_display_name", ""),
                 "symbols_scanned": payload.get("symbols_scanned", 0),
                 "candidates_considered": payload.get("candidates_considered", 0),
                 "qualified": payload.get("summary", {}).get("qualified", 0),

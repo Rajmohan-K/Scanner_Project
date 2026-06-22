@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import io
 import json
@@ -14,7 +15,13 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-from aiohttp import web
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except (AttributeError, RuntimeError):
+        pass
+
+from aiohttp import ClientConnectionResetError, web
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,7 +29,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from main import DEFAULT_BENCHMARK, WATCHLIST, calculate_market_open_analysis, dispatch_scan_telegram, is_valid_symbol, normalize_symbol, run_scan  # noqa: E402
+from config import V30_STREAM_INTERVAL_SECONDS, V30_STREAM_MAX_EVENTS  # noqa: E402
 from data.market_data import get_live_quote, get_stock_data  # noqa: E402
+from scanners.intraday_engine import analyze_intraday_symbols, quick_intraday_signal as build_quick_intraday_signal  # noqa: E402
+from scanners.meta_scanner import build_meta_scan  # noqa: E402
+from scanners.premarket_pipeline import build_intraday_payload, build_open_confirmation_payload, pipeline_snapshot  # noqa: E402
+from scanners.router import build_scan_metadata, normalize_scan_mode, scanner_profile, tag_records  # noqa: E402
+from scanners.services import IntradayScannerService  # noqa: E402
 from ui.storage import (
     delete_strategy,
     list_scans,
@@ -35,7 +48,9 @@ from ui.storage import (
     save_strategy,
     stock_history,
 )  # noqa: E402
-from ui import v20_store  # noqa: E402
+from ui import ai_intelligence, v20_store, v30_store  # noqa: E402
+from ui.stock_data_service import encode_sse, normalize_stock_symbol, stock_data_service  # noqa: E402
+from ui.watchlist_monitor import watchlist_monitor  # noqa: E402
 from data.market_data_provider import get_market_data_provider  # noqa: E402
 from utils.telegram import TelegramDeliveryError, send_telegram_messages, telegram_config_status  # noqa: E402
 from utils.logger import logger  # noqa: E402
@@ -91,7 +106,8 @@ def _namespace_from_payload(payload: dict[str, Any]) -> argparse.Namespace:
 
     period = payload.get("period", "6mo")
     interval = payload.get("interval", "1d")
-    scan_mode = str(payload.get("scan_mode") or payload.get("type") or "")
+    profile = scanner_profile(payload.get("scan_mode") or payload.get("type") or "", payload.get("pipeline_stage"))
+    scan_mode = profile.mode
     if "intraday" in scan_mode and str(interval).lower().endswith(("m", "h")):
         period = "60d" if str(interval).lower().endswith("h") else "30d"
 
@@ -101,11 +117,12 @@ def _namespace_from_payload(payload: dict[str, Any]) -> argparse.Namespace:
         interval=interval,
         benchmark=payload.get("benchmark", DEFAULT_BENCHMARK),
         scan_mode=scan_mode,
-        top_n=_int_value("top_n", 10),
+        pipeline_stage=profile.stage,
+        top_n=_int_value("top_n", profile.default_top_n),
         workers=_int_value("workers", 5),
         symbols_file=payload.get("symbols_file") or None,
-        candidate_pool=_int_value("candidate_pool", 150),
-        validation_pool=_int_value("validation_pool", 25),
+        candidate_pool=_int_value("candidate_pool", profile.default_candidate_pool),
+        validation_pool=_int_value("validation_pool", profile.default_validation_pool),
         strict_shortlist=bool(payload.get("strict_shortlist", False)),
         min_expected_return_pct=float(payload.get("min_expected_return_pct", 5) or 0),
         min_ml_probability=_float_or_none("min_ml_probability"),
@@ -117,6 +134,7 @@ def _namespace_from_payload(payload: dict[str, Any]) -> argparse.Namespace:
         refresh_universe=bool(payload.get("refresh_universe", False)),
         universe_output=payload.get("universe_output", "all_symbols.txt"),
         market_open_analysis=bool(payload.get("market_open_analysis", False)),
+        enable_deep_validation=bool(payload.get("enable_deep_validation", False)),
         market_open_time=payload.get("market_open_time", "09:08"),
         market_open_interval=payload.get("market_open_interval", "1m"),
         notify_telegram=bool(payload.get("notify_telegram", False)),
@@ -185,11 +203,11 @@ def _sector_heatmap(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _compare_with_previous(current_scan: dict[str, Any]) -> dict[str, Any]:
-    scans = list_scans(limit=2)
+    scans = _db_first_list_scans(limit=2)
     if len(scans) < 2:
         return {"available": False}
 
-    previous = load_scan(scans[1]["scan_id"])
+    previous = _db_first_load_scan(scans[1]["scan_id"])
     if not previous:
         return {"available": False}
 
@@ -315,6 +333,7 @@ from typing import Dict
 # Structure: {scan_id: {"task": asyncio.Task, "status": str, "result": dict|None, "payload": dict, "cancel_requested": bool}}
 scan_tasks: Dict[str, dict] = {}
 market_widget_cache: dict[str, Any] = {"updated_at": 0.0, "values": None, "refreshing": False}
+realtime_snapshot_cache: dict[str, Any] = {"updated_at": 0.0, "values": None, "refreshing": False}
 groww_intraday_cache: dict[str, Any] = {"updated_at": 0.0, "payload": None}
 
 
@@ -446,8 +465,10 @@ def _fetch_groww_intraday_rows(limit: int = 80) -> dict[str, Any]:
 def _scan_type_name(payload: dict[str, Any] | None, fallback: str = "standard") -> str:
     raw = fallback
     if payload:
+        if payload.get("scanner_display_name"):
+            return str(payload.get("scanner_display_name"))
         raw = str(payload.get("scan_mode") or payload.get("type") or payload.get("scan_type") or fallback)
-    return raw.replace("-", " ").replace("_", " ").strip().title() or "Standard Scan"
+    return scanner_profile(raw).display_name if raw else "Standard Scanner"
 
 
 def _task_progress(status: str | None) -> str:
@@ -463,16 +484,11 @@ def _task_progress(status: str | None) -> str:
 
 
 def _active_scan_snapshot() -> dict[str, Any] | None:
-    active_statuses = {"queued", "running", "paused", "cancel_requested"}
-    active_entries = [
-        (scan_id, entry)
-        for scan_id, entry in scan_tasks.items()
-        if entry.get("status") in active_statuses
-    ]
-    if not active_entries:
-        return None
+    rows = _active_scan_list()
+    return rows[0] if rows else None
 
-    scan_id, entry = sorted(active_entries, key=lambda item: item[1].get("created_at", ""), reverse=True)[0]
+
+def _memory_scan_summary(scan_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     payload = entry.get("payload") or {}
     status = entry.get("status") or "running"
     return {
@@ -486,6 +502,7 @@ def _active_scan_snapshot() -> dict[str, Any] | None:
         "payload": payload,
         "cancel_requested": entry.get("cancel_requested", False),
         "pause_requested": entry.get("pause_requested", False),
+        "source": "memory",
     }
 
 
@@ -505,6 +522,7 @@ def _scan_task_summary(scan_id: str, entry: dict[str, Any]) -> dict[str, Any]:
         "message": result.get("message") if isinstance(result, dict) else None,
         "cancel_requested": entry.get("cancel_requested", False),
         "pause_requested": entry.get("pause_requested", False),
+        "source": "memory",
     }
 
 
@@ -514,6 +532,14 @@ def _active_scan_list() -> list[dict[str, Any]]:
         for scan_id, entry in scan_tasks.items()
         if entry.get("status") in {"queued", "running", "paused", "cancel_requested"}
     ]
+    memory_ids = {str(row.get("scan_id") or row.get("id") or "") for row in rows}
+    try:
+        for row in v30_store.active_scan_runs(limit=30):
+            scan_id = str(row.get("scan_id") or row.get("id") or "")
+            if scan_id and scan_id not in memory_ids:
+                rows.append(row)
+    except Exception as exc:
+        logger.warning(f"DB active scan lookup skipped: {exc}")
     return sorted(rows, key=lambda item: item.get("created_at") or "", reverse=True)
 
 
@@ -529,20 +555,36 @@ async def _run_scan_in_thread(scan_id: str, payload: dict[str, Any]):
         setattr(args, "should_cancel", _should_cancel)
         setattr(args, "should_pause", _should_pause)
         logger.info(f"Background scan {scan_id} started for {len(args.symbols)} symbols")
-        result = await asyncio.to_thread(run_scan, args)
+        worker = asyncio.create_task(asyncio.to_thread(run_scan, args))
+        try:
+            while not worker.done():
+                status = "paused" if scan_tasks.get(scan_id, {}).get("pause_requested") else "running"
+                v30_store.update_scan_run_status(scan_id, status=status, message=f"Scan {status}")
+                await asyncio.sleep(8)
+            result = await worker
+        except asyncio.CancelledError:
+            worker.cancel()
+            v30_store.update_scan_run_status(scan_id, status="cancelled", message="Scan cancelled")
+            raise
         # If cancel requested, do not save result as active
         if scan_tasks.get(scan_id, {}).get("cancel_requested"):
             logger.info(f"Background scan {scan_id} completed but was cancelled; discarding results")
             scan_tasks[scan_id]["status"] = "cancelled"
             scan_tasks[scan_id]["result"] = None
+            metadata = build_scan_metadata(payload.get("scan_mode") or payload.get("type") or "standard", payload.get("pipeline_stage"))
+            _persist_scan_run(scan_id, {**metadata, "scan_params": payload, "message": "Scan cancelled"}, status="cancelled")
             return
 
         body = _scan_response_body(result)
-        body["scan_mode"] = payload.get("scan_mode", "standard")
+        metadata = build_scan_metadata(result.get("scan_mode") or payload.get("scan_mode", "standard"), result.get("pipeline_stage") or payload.get("pipeline_stage"))
+        body.update(metadata)
         body["scan_params"] = payload
-        saved_id = save_scan(body)
-        body["scan_id"] = saved_id
-        body["saved_scans"] = list_scans(limit=20)
+        body["scan_id"] = scan_id
+        _persist_scan_run(scan_id, body)
+        saved_id = save_scan({**body, "scanner_run_id": scan_id})
+        body["archive_scan_id"] = saved_id
+        _persist_scan_run(scan_id, body)
+        body["saved_scans"] = _db_first_list_scans(limit=20)
         body["comparison"] = _compare_with_previous(body)
         try:
             if getattr(args, "notify_telegram", False):
@@ -552,15 +594,18 @@ async def _run_scan_in_thread(scan_id: str, payload: dict[str, Any]):
 
         scan_tasks[scan_id]["status"] = "completed"
         scan_tasks[scan_id]["result"] = body
-        logger.info(f"Background scan {scan_id} completed and saved as {saved_id}")
+        logger.info(f"Background scan {scan_id} completed and archived as {saved_id}")
     except Exception as e:
         logger.error(f"Background scan {scan_id} failed: {e}", exc_info=True)
         scan_tasks[scan_id]["status"] = "error"
         scan_tasks[scan_id]["result"] = {"status": "error", "message": str(e)}
+        metadata = build_scan_metadata(payload.get("scan_mode") or payload.get("type") or "standard", payload.get("pipeline_stage"))
+        _persist_scan_run(scan_id, {**metadata, "scan_params": payload, "message": str(e)}, status="error")
 
 
 
 def _scan_response_body(scan_output: dict[str, Any]) -> dict[str, Any]:
+    metadata = build_scan_metadata(scan_output.get("scan_mode", "standard"), scan_output.get("pipeline_stage"))
     ranked_df = scan_output.get("ranked")
     ranked_records = []
     if ranked_df is not None and not getattr(ranked_df, "empty", True):
@@ -569,10 +614,10 @@ def _scan_response_body(scan_output: dict[str, Any]) -> dict[str, Any]:
             for record in ranked_df.to_dict(orient="records")
         ]
 
-    all_results = [
+    all_results = tag_records([
         _serialize_record(record)
         for record in scan_output.get("results", [])
-    ]
+    ], metadata)
     breadth = scan_output.get("breadth", {}) or {}
     filtered_results = []
     for record in all_results:
@@ -589,11 +634,11 @@ def _scan_response_body(scan_output: dict[str, Any]) -> dict[str, Any]:
 
     summary = _build_summary(filtered_results)
     def _records(name: str) -> list[dict[str, Any]]:
-        return [
+        return tag_records([
             _serialize_record(record)
             for record in scan_output.get(name, [])
             if isinstance(record, dict)
-        ]
+        ], metadata)
 
     filtered_ranked = []
     for record in ranked_records:
@@ -607,11 +652,13 @@ def _scan_response_body(scan_output: dict[str, Any]) -> dict[str, Any]:
             continue
         record["stock"] = normalized
         filtered_ranked.append(record)
+    filtered_ranked = tag_records(filtered_ranked, metadata)
 
     body = {
         "status": scan_output.get("status", "error"),
         "message": scan_output.get("message", ""),
         "report_path": scan_output.get("report_path"),
+        **metadata,
         "symbols_scanned": scan_output.get("symbols_scanned", 0),
         "candidates_considered": scan_output.get("candidates_considered", 0),
         "summary": summary,
@@ -627,8 +674,118 @@ def _scan_response_body(scan_output: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _persist_scan_run(scan_id: str, body: dict[str, Any], status: str = "completed") -> None:
+    try:
+        v30_store.persist_scan_run(scan_id, body, status=status)
+    except Exception as exc:
+        logger.warning(f"Unable to persist scan run {scan_id} to database: {exc}")
+
+
+def _persist_meta_scan(payload: dict[str, Any]) -> str:
+    run_id = datetime.now().strftime("meta_%Y%m%d_%H%M%S")
+    try:
+        summary = payload.get("summary") or {}
+        v20_store.execute(
+            """
+            INSERT OR REPLACE INTO meta_scan_runs(
+                id, timeframe, status, generated_at, symbols_analyzed, shown_count,
+                trade_count, watch_count, rejected_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                payload.get("timeframe", "intraday"),
+                payload.get("status", "ok"),
+                payload.get("generated_at"),
+                int(summary.get("symbols_analyzed") or 0),
+                int(summary.get("shown") or 0),
+                int(summary.get("trade") or 0),
+                int(summary.get("watch") or 0),
+                int(summary.get("rejected") or 0),
+            ),
+        )
+        for row in payload.get("all_results") or []:
+            v20_store.execute(
+                """
+                INSERT INTO meta_scan_results(
+                    meta_scan_run_id, symbol, timeframe, scan_types_matched, meta_score,
+                    scanner_agreement_score, ai_confidence, ml_confidence, risk_score,
+                    backtest_score, final_decision, trade_grade, should_show,
+                    should_trade, should_watch, should_reject, trade_plan,
+                    reason_selected, reason_rejected, data_freshness
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    row.get("symbol") or row.get("stock"),
+                    row.get("timeframe"),
+                    json.dumps(row.get("scan_types_matched") or []),
+                    row.get("meta_score"),
+                    row.get("scanner_agreement_score"),
+                    row.get("ai_confidence"),
+                    row.get("ml_confidence"),
+                    row.get("risk_score"),
+                    row.get("backtest_score"),
+                    row.get("final_decision"),
+                    row.get("trade_grade"),
+                    1 if row.get("should_show") else 0,
+                    1 if row.get("should_trade") else 0,
+                    1 if row.get("should_watch") else 0,
+                    1 if row.get("should_reject") else 0,
+                    json.dumps(row.get("trade_plan") or {}),
+                    row.get("reason_selected"),
+                    row.get("reason_rejected"),
+                    row.get("data_freshness"),
+                ),
+            )
+            for scan_id in row.get("source_scan_ids") or []:
+                for family in row.get("scan_types_matched") or []:
+                    v20_store.execute(
+                        "INSERT INTO scanner_signal_links(meta_scan_run_id, symbol, source_scan_id, scan_family) VALUES (?, ?, ?, ?)",
+                        (run_id, row.get("symbol") or row.get("stock"), scan_id, family),
+                    )
+        for agreement in payload.get("agreements") or []:
+            v20_store.execute(
+                "INSERT INTO scanner_agreements(meta_scan_run_id, symbol, scan_types, agreement_score) VALUES (?, ?, ?, ?)",
+                (run_id, agreement.get("symbol"), json.dumps(agreement.get("scan_types") or []), agreement.get("agreement_score")),
+            )
+        for conflict in payload.get("conflicts") or []:
+            for warning in conflict.get("warnings") or []:
+                v20_store.execute(
+                    "INSERT INTO scanner_conflicts(meta_scan_run_id, symbol, warning, risk_score) VALUES (?, ?, ?, ?)",
+                    (run_id, conflict.get("symbol"), warning, conflict.get("risk_score")),
+                )
+    except Exception as exc:
+        logger.warning(f"Unable to persist meta scan {run_id}: {exc}")
+    return run_id
+
+
+def _db_first_list_scans(limit: int = 40, family: str | None = None) -> list[dict[str, Any]]:
+    try:
+        scans = v30_store.list_scan_runs(limit=limit, family=family)
+        if scans:
+            return scans
+        v30_store.backfill_saved_scans(limit=max(limit, 120))
+        scans = v30_store.list_scan_runs(limit=limit, family=family)
+        if scans:
+            return scans
+    except Exception as exc:
+        logger.warning(f"DB-first scan list unavailable, using archive scan files: {exc}")
+    return list_scans(limit=limit)
+
+
+def _db_first_load_scan(scan_id: str) -> dict[str, Any] | None:
+    try:
+        payload = v30_store.load_scan_run(scan_id)
+        if payload:
+            return payload
+    except Exception as exc:
+        logger.warning(f"DB-first scan detail unavailable for {scan_id}, using archive scan file: {exc}")
+    return load_scan(scan_id)
+
+
 async def health(_: web.Request) -> web.Response:
-    saved_scans = list_scans(limit=1)
+    saved_scans = _db_first_list_scans(limit=1)
     latest_scan = saved_scans[0] if saved_scans else None
     return web.json_response({
         "status": "ok",
@@ -665,17 +822,26 @@ async def market_widgets(_: web.Request) -> web.Response:
     now_ts = datetime.now().timestamp()
     cached_values = market_widget_cache.get("values")
     active_scan = _active_scan_snapshot()
-    if cached_values and not active_scan and now_ts - float(market_widget_cache.get("updated_at", 0)) < 1:
-        return web.json_response(cached_values, dumps=lambda value: json.dumps(value, default=str))
+    if cached_values and now_ts - float(market_widget_cache.get("updated_at", 0)) < 5:
+        values = dict(cached_values)
+        if active_scan:
+            scan_name = active_scan.get("scan_type") or active_scan.get("display_name") or "Live Scan"
+            values.update({
+                "currentScan": scan_name,
+                "scanType": scan_name,
+                "scanStatus": active_scan.get("status") or "running",
+                "progress": active_scan.get("progress") or "running",
+            })
+        return web.json_response(values, dumps=lambda value: json.dumps(value, default=str))
 
-    latest_scans = list_scans(limit=1)
+    latest_scans = _db_first_list_scans(limit=1)
     latest_scan = latest_scans[0] if latest_scans else None
     scan_name = active_scan["scan_type"] if active_scan else _scan_type_name(latest_scan, "completed scan")
     scan_status = active_scan["status"] if active_scan else ("completed" if latest_scan else "idle")
     progress = active_scan["progress"] if active_scan else ("100%" if latest_scan else "0%")
     async def _timed_latest_close(symbol: str) -> float | None:
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_latest_close, symbol), timeout=4)
+            return await asyncio.wait_for(asyncio.to_thread(_latest_close, symbol), timeout=1.8)
         except Exception as exc:
             logger.warning(f"Market widget quote timeout for {symbol}: {exc}")
             return None
@@ -715,7 +881,7 @@ async def active_scan(_: web.Request) -> web.Response:
     if active:
         return web.json_response(active, dumps=lambda value: json.dumps(value, default=str))
 
-    scans = list_scans(limit=1)
+    scans = _db_first_list_scans(limit=1)
     latest_scan = scans[0] if scans else None
     if not latest_scan:
         return web.json_response({
@@ -759,12 +925,17 @@ async def scan(request: web.Request) -> web.Response:
         scan_output = run_scan(args)
         logger.info(f"Scan completed: {scan_output.get('status')}")
         body = _scan_response_body(scan_output)
-        body["scan_mode"] = payload.get("scan_mode", "standard")
+        metadata = build_scan_metadata(scan_output.get("scan_mode") or payload.get("scan_mode", "standard"), scan_output.get("pipeline_stage") or payload.get("pipeline_stage"))
+        body.update(metadata)
         body["scan_params"] = payload
 
-        scan_id = save_scan(body)
+        scan_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         body["scan_id"] = scan_id
-        body["saved_scans"] = list_scans(limit=20)
+        _persist_scan_run(scan_id, body)
+        save_scan(body, scan_id=scan_id)
+        body["archive_scan_id"] = scan_id
+        _persist_scan_run(scan_id, body)
+        body["saved_scans"] = _db_first_list_scans(limit=20)
         body["comparison"] = _compare_with_previous(body)
         try:
             if getattr(args, "notify_telegram", False):
@@ -784,22 +955,22 @@ async def scan(request: web.Request) -> web.Response:
 
 
 async def scans(_: web.Request) -> web.Response:
-    return web.json_response({"scans": list_scans(limit=40)})
+    return web.json_response({"scans": _db_first_list_scans(limit=40)})
 
 
 async def scan_detail(request: web.Request) -> web.Response:
     scan_id = request.match_info["scan_id"]
-    payload = load_scan(scan_id)
+    payload = _db_first_load_scan(scan_id)
     if not payload:
         raise web.HTTPNotFound(text="Scan not found")
-    payload["saved_scans"] = list_scans(limit=20)
+    payload["saved_scans"] = _db_first_list_scans(limit=20)
     payload["comparison"] = _compare_with_previous(payload)
     return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
 
 
 async def report_excel(request: web.Request) -> web.Response:
     scan_id = request.match_info["scan_id"]
-    payload = load_scan(scan_id)
+    payload = _db_first_load_scan(scan_id)
     if not payload:
         raise web.HTTPNotFound(text="Scan not found")
 
@@ -901,7 +1072,7 @@ async def market_open_analysis(request: web.Request) -> web.Response:
 
     symbols: list[str] = []
     if scan_id:
-        payload = load_scan(scan_id)
+        payload = _db_first_load_scan(scan_id)
         if payload:
             symbols = [item.get("stock") for item in payload.get("results", []) if item.get("stock")]
 
@@ -1018,12 +1189,12 @@ async def candlestick_data(request: web.Request) -> web.Response:
 async def export_watchlist(request: web.Request) -> web.Response:
     scan_id = request.query.get("scan_id", "").strip()
     horizon = request.query.get("horizon", "intraday").strip().lower()
-    payload = load_scan(scan_id) if scan_id else None
+    payload = _db_first_load_scan(scan_id) if scan_id else None
     if not payload:
         # If no explicit scan_id or the requested scan is missing, use the most recent saved scan.
-        scans = list_scans(limit=1)
+        scans = _db_first_list_scans(limit=1)
         if scans:
-            payload = load_scan(scans[0]["scan_id"])
+            payload = _db_first_load_scan(scans[0]["scan_id"])
             scan_id = scans[0]["scan_id"]
     if not payload:
         raise web.HTTPNotFound(text="Saved scan not found for export")
@@ -1048,6 +1219,17 @@ async def start_scan(request: web.Request) -> web.Response:
         "pause_requested": False,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
+    queued_metadata = build_scan_metadata(payload.get("scan_mode") or payload.get("type") or "standard", payload.get("pipeline_stage"))
+    _persist_scan_run(
+        scan_id,
+        {
+            **queued_metadata,
+            "scan_params": payload,
+            "created_at": scan_tasks[scan_id]["created_at"],
+            "message": "Scan queued",
+        },
+        status="running",
+    )
 
     # Create background task
     task = asyncio.create_task(_run_scan_in_thread(scan_id, payload))
@@ -1060,6 +1242,219 @@ async def start_scan(request: web.Request) -> web.Response:
         "display_name": _scan_type_name(payload),
         "status": "running",
     })
+
+
+def _family_matches(payload: dict[str, Any], family: str) -> bool:
+    text = " ".join(
+        str(payload.get(key, ""))
+        for key in ("scan_family", "scanner_bucket", "pipeline_stage", "scan_mode")
+    ).lower()
+    if family == "open_confirmation":
+        return "open_confirmation" in text or "open-confirmation" in text or "market-open" in text
+    return family in text
+
+
+def _latest_scan_for_family(family: str) -> dict[str, Any] | None:
+    try:
+        payload = v30_store.latest_scan_for_family(family)
+        if payload:
+            return payload
+    except Exception as exc:
+        logger.warning(f"DB-first latest scan lookup failed for {family}: {exc}")
+    for item in list_scans(limit=120):
+        payload = load_scan(item.get("scan_id", ""))
+        if payload and _family_matches(payload, family):
+            return payload
+    return None
+
+
+async def run_dedicated_scan(request: web.Request) -> web.Response:
+    family = request.match_info.get("family", "")
+    mode_map = {
+        "premarket": "premarket",
+        "open-confirmation": "open-confirmation",
+        "intraday": "intraday",
+    }
+    scan_mode = mode_map.get(family)
+    if not scan_mode:
+        raise web.HTTPNotFound(text="Unknown scanner family")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload["scan_mode"] = scan_mode
+    payload["pipeline_stage"] = scanner_profile(scan_mode).stage
+    if scan_mode == "open-confirmation" and not payload.get("symbols"):
+        latest_premarket = _latest_scan_for_family("premarket")
+        if latest_premarket:
+            payload.update(build_open_confirmation_payload(latest_premarket))
+    if scan_mode == "intraday" and not payload.get("symbols"):
+        latest_open = _latest_scan_for_family("open_confirmation")
+        if latest_open:
+            payload.update(build_intraday_payload(latest_open))
+
+    scan_id = uuid.uuid4().hex
+    scan_tasks[scan_id] = {
+        "task": None,
+        "status": "queued",
+        "result": None,
+        "payload": payload,
+        "cancel_requested": False,
+        "pause_requested": False,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    queued_metadata = build_scan_metadata(payload.get("scan_mode") or payload.get("type") or scan_mode, payload.get("pipeline_stage"))
+    _persist_scan_run(
+        scan_id,
+        {
+            **queued_metadata,
+            "scan_params": payload,
+            "created_at": scan_tasks[scan_id]["created_at"],
+            "message": "Scan queued",
+        },
+        status="running",
+    )
+    task = asyncio.create_task(_run_scan_in_thread(scan_id, payload))
+    scan_tasks[scan_id]["task"] = task
+    scan_tasks[scan_id]["status"] = "running"
+    return web.json_response({
+        "scan_id": scan_id,
+        "scan_type": _scan_type_name(payload),
+        "display_name": _scan_type_name(payload),
+        "status": "running",
+        "payload": payload,
+    }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def dedicated_scan_latest(request: web.Request) -> web.Response:
+    family = request.match_info.get("family", "").replace("-", "_")
+    payload = _latest_scan_for_family(family)
+    if not payload:
+        return web.json_response({"status": "empty", "message": f"No {family} scan saved yet", "rows": []})
+    payload["saved_scans"] = _db_first_list_scans(limit=20)
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def dedicated_scan_results(request: web.Request) -> web.Response:
+    scan_id = request.match_info.get("scan_id")
+    payload = _db_first_load_scan(scan_id)
+    if not payload:
+        raise web.HTTPNotFound(text="Scan not found")
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def pipeline_today(_: web.Request) -> web.Response:
+    scans = v30_store.scan_payloads(limit=120)
+    if not scans:
+        for item in list_scans(limit=120):
+            payload = load_scan(item.get("scan_id", ""))
+            if payload:
+                scans.append(payload)
+    return web.json_response(pipeline_snapshot(scans), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def pipeline_prepare(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    stage = normalize_scan_mode(payload.get("stage"))
+    source_scan_id = payload.get("source_scan_id")
+    source_payload = _db_first_load_scan(source_scan_id) if source_scan_id else None
+    if not source_payload:
+        source_payload = _latest_scan_for_family("premarket" if stage == "open-confirmation" else "open_confirmation")
+    if not source_payload:
+        return web.json_response({"status": "empty", "message": "No source scan found for pipeline stage"}, status=404)
+    if stage == "open-confirmation":
+        prepared = build_open_confirmation_payload(source_payload, market_open_time=str(payload.get("market_open_time") or "09:08"))
+    else:
+        prepared = build_intraday_payload(source_payload, interval=str(payload.get("interval") or "5m"))
+    return web.json_response({"status": "ok", "payload": prepared}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def meta_scanner_run(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    timeframe = str(payload.get("timeframe") or request.query.get("timeframe") or "intraday")
+    result = await asyncio.to_thread(build_meta_scan, timeframe)
+    result["meta_scan_id"] = _persist_meta_scan(result)
+    return web.json_response(result, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def meta_scanner_latest(request: web.Request) -> web.Response:
+    timeframe = str(request.query.get("timeframe") or "intraday")
+    result = await asyncio.to_thread(build_meta_scan, timeframe)
+    return web.json_response(result, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def meta_scanner_timeframe(request: web.Request) -> web.Response:
+    timeframe = request.match_info.get("timeframe", "intraday")
+    result = await asyncio.to_thread(build_meta_scan, timeframe)
+    return web.json_response(result, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def meta_scanner_symbol_details(request: web.Request) -> web.Response:
+    symbol = normalize_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    result = await asyncio.to_thread(build_meta_scan, str(request.query.get("timeframe") or "intraday"))
+    matches = [row for row in result.get("all_results", []) if str(row.get("symbol") or row.get("stock")).upper() == symbol]
+    if not matches:
+        return web.json_response({"status": "empty", "symbol": symbol, "message": "No meta scanner record found", "rows": []}, status=404)
+    return web.json_response({"status": "ok", "symbol": symbol, "details": matches[0]}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def meta_scanner_conflicts(_: web.Request) -> web.Response:
+    result = await asyncio.to_thread(build_meta_scan, "intraday")
+    return web.json_response({"status": "ok", "conflicts": result.get("conflicts", [])}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def meta_scanner_agreements(_: web.Request) -> web.Response:
+    result = await asyncio.to_thread(build_meta_scan, "intraday")
+    return web.json_response({"status": "ok", "agreements": result.get("agreements", [])}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def final_decisions_latest(request: web.Request) -> web.Response:
+    timeframe = str(request.query.get("timeframe") or "intraday")
+    result = await asyncio.to_thread(build_meta_scan, timeframe)
+    return web.json_response({
+        "status": result.get("status", "ok"),
+        "generated_at": result.get("generated_at"),
+        "timeframe": timeframe,
+        "message": result.get("message"),
+        "summary": result.get("summary", {}),
+        "decisions": result.get("results", []),
+        "rejected": result.get("rejected", []),
+    }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ml_predictions_latest(request: web.Request) -> web.Response:
+    timeframe = str(request.query.get("timeframe") or "intraday")
+    result = await asyncio.to_thread(build_meta_scan, timeframe)
+    predictions = [
+        {
+            "symbol": row.get("symbol"),
+            "timeframe": row.get("timeframe"),
+            "ml_confidence": row.get("ml_confidence"),
+            "ai_confidence": row.get("ai_confidence"),
+            "backtest_score": row.get("backtest_score"),
+            "risk_score": row.get("risk_score"),
+            "meta_score": row.get("meta_score"),
+            "final_decision": row.get("final_decision"),
+            "reason": row.get("reason_selected") or row.get("reason_rejected"),
+            "data_freshness": row.get("data_freshness"),
+        }
+        for row in result.get("all_results", [])
+    ]
+    return web.json_response({
+        "status": result.get("status", "ok"),
+        "generated_at": result.get("generated_at"),
+        "timeframe": timeframe,
+        "predictions": predictions,
+        "summary": result.get("summary", {}),
+    }, dumps=lambda value: json.dumps(value, default=str))
 
 
 async def groww_intraday_source(request: web.Request) -> web.Response:
@@ -1082,6 +1477,135 @@ async def groww_intraday_source(request: web.Request) -> web.Response:
         }, status=502)
 
 
+async def groww_intraday_analyze(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json() if request.method == "POST" else {}
+    except Exception:
+        payload = {}
+    try:
+        limit = int(payload.get("limit") or request.query.get("limit", "80") or 80)
+    except ValueError:
+        limit = 80
+    limit = max(5, min(limit, 200))
+    interval = str(payload.get("interval") or request.query.get("interval") or "5m")
+    if interval not in {"1m", "2m", "5m", "15m", "30m", "60m", "1h"}:
+        interval = "5m"
+    try:
+        cache_seconds = int(payload.get("cache_seconds") or request.query.get("cache_seconds") or 90)
+    except ValueError:
+        cache_seconds = 90
+    try:
+        workers = int(payload.get("workers") or request.query.get("workers") or 4)
+    except ValueError:
+        workers = 4
+
+    try:
+        source_payload = await asyncio.to_thread(_fetch_groww_intraday_rows, limit)
+        symbols = list(dict.fromkeys(str(symbol).upper() for symbol in source_payload.get("symbols", []) if symbol))
+        if not symbols:
+            return web.json_response(
+                {
+                    "status": "empty",
+                    "message": "Groww source returned no resolved NSE symbols.",
+                    "source": source_payload,
+                    "rows": [],
+                    "all_rows": [],
+                    "symbols": [],
+                },
+                dumps=lambda value: json.dumps(value, default=str),
+            )
+
+        analysis = await asyncio.to_thread(
+            analyze_intraday_symbols,
+            symbols,
+            interval,
+            "groww",
+            max(0, cache_seconds),
+            max(1, min(workers, 8)),
+        )
+        rows = []
+        for row in analysis.get("rows") or []:
+            normalized = IntradayScannerService.normalize_row(row)
+            normalized.update({
+                "source": "groww",
+                "source_name": "Groww Intraday",
+                "source_pipeline_stage": "groww_quick_signal",
+                "pipeline_stage": "groww_quick_signal",
+            })
+            rows.append(normalized)
+        all_rows = []
+        for row in analysis.get("all_rows") or []:
+            normalized = IntradayScannerService.normalize_row(row)
+            normalized.update({
+                "source": "groww",
+                "source_name": "Groww Intraday",
+                "source_pipeline_stage": "groww_quick_signal",
+                "pipeline_stage": "groww_quick_signal",
+            })
+            all_rows.append(normalized)
+
+        scan_id = f"groww_intraday_quick_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        body = {
+            "status": "ok",
+            "message": analysis.get("message") or "Groww intraday quick analysis complete.",
+            "scan_mode": IntradayScannerService.scan_type,
+            "scan_type": IntradayScannerService.scan_type,
+            "scan_family": IntradayScannerService.scan_family,
+            "scanner_bucket": IntradayScannerService.scanner_bucket,
+            "pipeline_stage": "groww_quick_signal",
+            "symbols_scanned": len(symbols),
+            "candidates_considered": len(all_rows),
+            "summary": {
+                "qualified": len(rows),
+                "source": "groww",
+                "source_count": source_payload.get("count", len(symbols)),
+                "resolved_count": source_payload.get("resolved_count", len(symbols)),
+                "newly_analyzed": len(analysis.get("analyzed_symbols") or []),
+                "served_from_cache": len(analysis.get("cached_symbols") or []),
+                "failed": len(analysis.get("failed") or []),
+            },
+            "ranked": rows,
+            "top_25": rows[:25],
+            "final_top_10": rows[:10],
+            "results": all_rows,
+            "scan_params": {
+                "source": "groww",
+                "limit": limit,
+                "interval": interval,
+                "cache_seconds": cache_seconds,
+                "workers": workers,
+                "symbols": symbols,
+            },
+        }
+        _persist_scan_run(scan_id, body)
+        return web.json_response(
+            {
+                **analysis,
+                "scan_id": scan_id,
+                "rows": rows,
+                "all_rows": all_rows,
+                "source_count": source_payload.get("count", len(symbols)),
+                "resolved_count": source_payload.get("resolved_count", len(symbols)),
+                "source_rows": source_payload.get("rows", []),
+                "source": "https://groww.in/stocks/intraday",
+                "engine": "IntradayScannerService",
+            },
+            dumps=lambda value: json.dumps(value, default=str),
+        )
+    except Exception as exc:
+        logger.error(f"Groww intraday quick analysis failed: {exc}", exc_info=True)
+        return web.json_response(
+            {
+                "status": "error",
+                "message": f"Groww intraday quick analysis failed: {exc}",
+                "rows": [],
+                "all_rows": [],
+            },
+            status=502,
+            dumps=lambda value: json.dumps(value, default=str),
+        )
+
+
 async def stop_scan(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
@@ -1100,11 +1624,17 @@ async def stop_scan(request: web.Request) -> web.Response:
         try:
             task.cancel()
             entry["status"] = "cancelled"
+            metadata = build_scan_metadata((entry.get("payload") or {}).get("scan_mode") or (entry.get("payload") or {}).get("type") or "standard", (entry.get("payload") or {}).get("pipeline_stage"))
+            _persist_scan_run(scan_id, {**metadata, "scan_params": entry.get("payload") or {}, "message": "Scan cancelled"}, status="cancelled")
             return web.json_response({"status": "ok", "message": "cancelled"})
         except Exception:
             entry["status"] = "cancel_requested"
+            metadata = build_scan_metadata((entry.get("payload") or {}).get("scan_mode") or (entry.get("payload") or {}).get("type") or "standard", (entry.get("payload") or {}).get("pipeline_stage"))
+            _persist_scan_run(scan_id, {**metadata, "scan_params": entry.get("payload") or {}, "message": "Scan cancellation requested"}, status="cancel_requested")
             return web.json_response({"status": "ok", "message": "cancel requested"})
 
+    metadata = build_scan_metadata((entry.get("payload") or {}).get("scan_mode") or (entry.get("payload") or {}).get("type") or "standard", (entry.get("payload") or {}).get("pipeline_stage"))
+    _persist_scan_run(scan_id, {**metadata, "scan_params": entry.get("payload") or {}, "message": "Scan already completed"}, status=str(entry.get("status") or "completed"))
     return web.json_response({"status": "ok", "message": "already completed"})
 
 
@@ -1121,6 +1651,8 @@ async def stop_all_scans(_: web.Request) -> web.Response:
                 task.cancel()
             except Exception:
                 entry["status"] = "cancel_requested"
+        metadata = build_scan_metadata((entry.get("payload") or {}).get("scan_mode") or (entry.get("payload") or {}).get("type") or "standard", (entry.get("payload") or {}).get("pipeline_stage"))
+        _persist_scan_run(scan_id, {**metadata, "scan_params": entry.get("payload") or {}, "message": "Scan cancelled"}, status=str(entry.get("status") or "cancelled"))
         stopped.append(_scan_task_summary(scan_id, entry))
     return web.json_response({
         "status": "ok",
@@ -1141,6 +1673,10 @@ async def pause_scan(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": "scan_id not found"}, status=404)
     entry["pause_requested"] = True
     entry["status"] = "paused"
+    try:
+        v30_store.update_scan_run_status(scan_id, status="paused", message="Scan paused")
+    except Exception as exc:
+        logger.warning(f"Unable to persist pause state for {scan_id}: {exc}")
     return web.json_response({"status": "ok", "message": "pause requested", "scan_id": scan_id})
 
 
@@ -1157,6 +1693,10 @@ async def resume_scan(request: web.Request) -> web.Response:
     entry["pause_requested"] = False
     if entry.get("status") == "paused":
         entry["status"] = "running"
+    try:
+        v30_store.update_scan_run_status(scan_id, status=str(entry.get("status") or "running"), message="Scan resumed")
+    except Exception as exc:
+        logger.warning(f"Unable to persist resume state for {scan_id}: {exc}")
     return web.json_response({"status": "ok", "message": "resumed", "scan_id": scan_id})
 
 
@@ -1165,7 +1705,7 @@ async def scan_status(request: web.Request) -> web.Response:
     entry = scan_tasks.get(scan_id)
     if not entry:
         # Fallback to saved scans
-        payload = load_scan(scan_id) if scan_id else None
+        payload = _db_first_load_scan(scan_id) if scan_id else None
         if payload:
             return web.json_response({"status": "completed", "result": payload})
         return web.json_response({"status": "error", "message": "scan_id not found"}, status=404)
@@ -1180,6 +1720,15 @@ async def scan_status(request: web.Request) -> web.Response:
         "cancel_requested": entry.get("cancel_requested", False),
         "pause_requested": entry.get("pause_requested", False),
     }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def v30_backfill_scans(request: web.Request) -> web.Response:
+    try:
+        limit = int(request.query.get("limit", "500") or 500)
+    except ValueError:
+        limit = 500
+    result = await asyncio.to_thread(v30_store.backfill_saved_scans, max(1, min(limit, 2000)))
+    return web.json_response(result, dumps=lambda value: json.dumps(value, default=str))
 
 
 def _query_payload(request: web.Request) -> dict[str, Any]:
@@ -1200,6 +1749,25 @@ async def quick_intraday_signal(request: web.Request) -> web.Response:
     interval = request.query.get("interval", "5m")
     if interval not in {"1m", "2m", "5m", "15m", "30m", "60m", "1h"}:
         interval = "5m"
+    try:
+        payload = await asyncio.to_thread(build_quick_intraday_signal, symbol, interval)
+        return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+    except Exception as exc:
+        logger.warning(f"Quick intraday engine failed for {symbol}: {exc}")
+        return web.json_response(
+            {
+                "status": "error",
+                "symbol": symbol,
+                "interval": interval,
+                "message": str(exc),
+                "row": None,
+                "data_state": "unavailable",
+                "stale": True,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            status=503,
+            dumps=lambda value: json.dumps(value, default=str),
+        )
     period = "5d" if str(interval).endswith("m") else "30d"
     try:
         quote = get_live_quote(symbol, use_cache=False) or {}
@@ -1314,8 +1882,198 @@ async def quick_intraday_signal(request: web.Request) -> web.Response:
 
 
 async def v20_dashboard(_: web.Request) -> web.Response:
-    v20_store.refresh_realtime_snapshot()
-    return web.json_response(v20_store.dashboard_payload(), dumps=lambda value: json.dumps(value, default=str))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(v20_store.refresh_realtime_snapshot), timeout=2.0)
+    except asyncio.TimeoutError:
+        logger.debug("Dashboard realtime refresh skipped: refresh timeout")
+    except Exception as exc:
+        logger.warning(f"Dashboard realtime refresh skipped: {exc!r}")
+    payload = await asyncio.to_thread(v20_store.dashboard_payload)
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def _cached_realtime_payload(max_age_seconds: float = 2.0) -> dict[str, Any]:
+    now_ts = datetime.now().timestamp()
+    cached = realtime_snapshot_cache.get("values")
+    if cached and now_ts - float(realtime_snapshot_cache.get("updated_at", 0)) < max_age_seconds:
+        return cached
+    if realtime_snapshot_cache.get("refreshing") and cached:
+        return {**cached, "status": cached.get("status") or "stale", "serving_cached": True}
+    realtime_snapshot_cache["refreshing"] = True
+    try:
+        payload = await asyncio.wait_for(asyncio.to_thread(v20_store.realtime_payload), timeout=3.5)
+        realtime_snapshot_cache["values"] = payload
+        realtime_snapshot_cache["updated_at"] = datetime.now().timestamp()
+        return payload
+    except Exception as exc:
+        if cached:
+            stale = {
+                **cached,
+                "status": "stale",
+                "serving_cached": True,
+                "message": f"Serving cached realtime snapshot while backend refresh catches up: {exc}",
+            }
+            realtime_snapshot_cache["values"] = stale
+            return stale
+        return {
+            "status": "stale",
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "message": f"Realtime snapshot temporarily unavailable; waiting for first successful cache refresh: {exc!r}",
+            "freshness": {"updated_at": "", "age_seconds": None, "stale": True},
+            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "sqlite+memory"},
+            "indices": [],
+            "buckets": {},
+            "ai_insights": [],
+            "events": [],
+        }
+    finally:
+        realtime_snapshot_cache["refreshing"] = False
+
+
+async def realtime_snapshot(_: web.Request) -> web.Response:
+    try:
+        payload = await _cached_realtime_payload(max_age_seconds=2.0)
+    except Exception as exc:
+        logger.debug(f"Realtime snapshot unavailable: {exc!r}")
+        payload = {
+            "status": "stale",
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "message": "Realtime snapshot temporarily unavailable; serving explicit stale state.",
+            "freshness": {"updated_at": "", "age_seconds": None, "stale": True},
+            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "sqlite"},
+            "buckets": {},
+            "events": [],
+        }
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def opportunity_latest(request: web.Request) -> web.Response:
+    kind = request.match_info.get("kind", "top")
+    try:
+        limit = int(request.query.get("limit", str(v30_store.V30_OPPORTUNITY_LIMIT if hasattr(v30_store, "V30_OPPORTUNITY_LIMIT") else 50)) or 50)
+    except ValueError:
+        limit = 50
+    payload = await asyncio.to_thread(v30_store.opportunity_rows, kind, limit)
+    if payload.get("status") == "empty":
+        try:
+            await asyncio.to_thread(v20_store.realtime_payload)
+            payload = await asyncio.to_thread(v30_store.opportunity_rows, kind, limit)
+        except Exception as exc:
+            logger.warning(f"Opportunity refresh unavailable for {kind}: {exc}")
+            payload["message"] = "Opportunity cache unavailable; run/refresh a live scan or configure provider."
+            payload["error"] = str(exc)
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def opportunity_top(request: web.Request) -> web.Response:
+    try:
+        limit = int(request.query.get("limit", "50") or 50)
+    except ValueError:
+        limit = 50
+    payload = await asyncio.to_thread(v30_store.opportunity_rows, "top", limit)
+    if payload.get("status") == "empty":
+        try:
+            await asyncio.to_thread(v20_store.realtime_payload)
+            payload = await asyncio.to_thread(v30_store.opportunity_rows, "top", limit)
+        except Exception as exc:
+            logger.warning(f"Top opportunity refresh unavailable: {exc}")
+            payload["message"] = "Opportunity cache unavailable; run/refresh a live scan or configure provider."
+            payload["error"] = str(exc)
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def v30_stream(request: web.Request) -> web.StreamResponse:
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await response.prepare(request)
+    sent = 0
+    while True:
+        if request.transport is None or request.transport.is_closing():
+            break
+        try:
+            snapshot = await _cached_realtime_payload(max_age_seconds=2.0)
+        except Exception as exc:
+            snapshot = {
+                "status": "stale",
+                "message": str(exc),
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "freshness": {"updated_at": "", "age_seconds": None, "stale": True},
+                "buckets": {},
+            }
+        events = [
+            {"type": "QUOTE_UPDATED", "payload": {"indices": snapshot.get("indices", []), "freshness": snapshot.get("freshness", {})}},
+            {"type": "SCANNER_UPDATED", "payload": {"buckets": snapshot.get("buckets", {}), "freshness": snapshot.get("freshness", {})}},
+            {"type": "OPPORTUNITY_UPDATED", "payload": {"buckets": snapshot.get("buckets", {}), "freshness": snapshot.get("freshness", {})}},
+            {"type": "AI_SCORE_CHANGED", "payload": {"ai_insights": snapshot.get("ai_insights", []), "freshness": snapshot.get("freshness", {})}},
+            {"type": "ML_SCORE_CHANGED", "payload": {"freshness": snapshot.get("freshness", {})}},
+            {"type": "META_SCORE_CHANGED", "payload": {"freshness": snapshot.get("freshness", {})}},
+        ]
+        disconnected = False
+        for event in events:
+            #await response.write(f"event: {event['type']}\ndata: {json.dumps(event, default=str)}\n\n".encode("utf-8"))
+            try:
+                await response.write(f"event: {event['type']}\ndata: {json.dumps(event, default=str)}\n\n".encode("utf-8"))
+            except ClientConnectionResetError:
+                logger.debug("Realtime stream client disconnected")
+                disconnected = True
+                break
+            except ConnectionResetError:
+                logger.debug("Realtime stream connection reset by peer")
+                disconnected = True
+                break
+        if disconnected:
+            break
+        sent += 1
+        if V30_STREAM_MAX_EVENTS and sent >= V30_STREAM_MAX_EVENTS:
+            break
+        await asyncio.sleep(max(0.5, float(V30_STREAM_INTERVAL_SECONDS)))
+    return response
+
+
+async def dashboard_live(_: web.Request) -> web.Response:
+    try:
+        payload = await asyncio.to_thread(v20_store.dashboard_payload)
+    except Exception as exc:
+        logger.warning(f"Live dashboard unavailable: {exc}")
+        return web.json_response(
+            {
+                "status": "error",
+                "data_status": "unavailable",
+                "message": "Live dashboard data is unavailable. Check backend data provider and SQLite availability.",
+                "error": str(exc),
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            status=503,
+        )
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def scanner_latest_alias(request: web.Request) -> web.Response:
+    scan_type = str(request.match_info.get("scan_type") or "intraday").strip().lower()
+    family_map = {
+        "open-confirmation": "open-confirmation",
+        "open_confirmation": "open-confirmation",
+        "premarket": "premarket",
+        "intraday": "intraday",
+        "swing": "swing",
+        "groww": "groww-intraday",
+        "groww-intraday": "groww-intraday",
+    }
+    family = family_map.get(scan_type, scan_type)
+    payload = _latest_scan_for_family(family)
+    if not payload and family == "groww-intraday":
+        payload = _latest_scan_for_family("intraday")
+    if not payload:
+        return web.json_response({"status": "empty", "scan_type": scan_type, "message": f"No {scan_type} scan saved yet", "rows": []})
+    return web.json_response(payload, dumps=lambda value: json.dumps(value, default=str))
 
 
 async def v20_stocks(request: web.Request) -> web.Response:
@@ -1353,6 +2111,274 @@ async def v20_candles(request: web.Request) -> web.Response:
     if not candles:
         raise web.HTTPServiceUnavailable(text=f"historical candles unavailable for {symbol}")
     return web.json_response({"symbol": symbol, "period": period, "interval": interval, "candles": candles}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def stock_search(request: web.Request) -> web.Response:
+    query = str(request.query.get("q") or "")
+    try:
+        limit = max(1, min(25, int(request.query.get("limit", "12"))))
+    except ValueError:
+        limit = 12
+    return web.json_response(stock_data_service.search(query, limit), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def stock_detail(request: web.Request) -> web.Response:
+    symbol = normalize_stock_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    payload = await stock_data_service.get_stock(symbol)
+    status = 503 if payload.get("status") == "error" and not payload.get("stale") else 200
+    return web.json_response(payload, status=status, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def stock_candles(request: web.Request) -> web.Response:
+    symbol = normalize_stock_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    range_key = str(request.query.get("range") or "1D")
+    payload = await stock_data_service.get_candles(symbol, range_key)
+    status = 503 if payload.get("status") == "error" and not payload.get("stale") else 200
+    return web.json_response(payload, status=status, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def stock_analysis(request: web.Request) -> web.Response:
+    symbol = normalize_stock_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    payload = await stock_data_service.get_analysis(symbol)
+    payload["scan_type"] = str(request.query.get("scan_type") or "all")
+    status = 503 if payload.get("status") == "error" and not payload.get("stale") else 200
+    return web.json_response(payload, status=status, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def stock_stream(request: web.Request) -> web.StreamResponse:
+    symbol = normalize_stock_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await response.prepare(request)
+    last_quote_signature = ""
+    last_analysis_signature = ""
+    try:
+        for _ in range(1800):
+            stock = await stock_data_service.get_stock(symbol, allow_stale=True)
+            quote_signature = json.dumps(stock.get("quote") or {}, sort_keys=True, default=str)
+            if quote_signature != last_quote_signature:
+                await response.write(await encode_sse("QUOTE_UPDATED", stock))
+                last_quote_signature = quote_signature
+            analysis = await stock_data_service.get_analysis(symbol, allow_stale=True)
+            analysis_signature = json.dumps(
+                {
+                    "intraday": analysis.get("intraday_view"),
+                    "swing": analysis.get("swing_view"),
+                    "price": (analysis.get("quote") or {}).get("current_price"),
+                    "stale": analysis.get("stale"),
+                },
+                sort_keys=True,
+                default=str,
+            )
+            if analysis_signature != last_analysis_signature:
+                await response.write(await encode_sse("ANALYSIS_UPDATED", analysis))
+                last_analysis_signature = analysis_signature
+            await response.write(await encode_sse("HEARTBEAT", {"symbol": symbol, "updated_at": datetime.now().isoformat(timespec="seconds")}))
+            await asyncio.sleep(2)
+    except (asyncio.CancelledError, ClientConnectionResetError, ConnectionResetError):
+        logger.debug(f"Stock stream client disconnected for {symbol}")
+    except Exception as exc:
+        logger.warning(f"Stock stream ended for {symbol}: {exc}")
+    return response
+
+
+async def watchlist_items(request: web.Request) -> web.Response:
+    if request.method == "GET":
+        return web.json_response(
+            {"status": "ok", "items": watchlist_monitor.list_items(), "settings": watchlist_monitor.get_settings()},
+            dumps=lambda value: json.dumps(value, default=str),
+        )
+    payload = await request.json()
+    try:
+        item = await watchlist_monitor.add_item(payload)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    return web.json_response({"status": "ok", "item": item}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def watchlist_item_update(request: web.Request) -> web.Response:
+    symbol = normalize_stock_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    if request.method == "DELETE":
+        removed = watchlist_monitor.remove_item(symbol)
+        return web.json_response({"status": "ok", "removed": removed, "symbol": symbol})
+    payload = await request.json()
+    item = await watchlist_monitor.update_item(symbol, payload)
+    return web.json_response({"status": "ok", "item": item}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def watchlist_status(_: web.Request) -> web.Response:
+    return web.json_response(
+        {"status": "ok", "monitor": watchlist_monitor.status, "count": len(watchlist_monitor.items)},
+        dumps=lambda value: json.dumps(value, default=str),
+    )
+
+
+async def watchlist_stream(request: web.Request) -> web.StreamResponse:
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await response.prepare(request)
+    last_signature = ""
+    try:
+        for _ in range(1800):
+            payload = {
+                "status": "ok",
+                "items": watchlist_monitor.list_items(),
+                "monitor": watchlist_monitor.status,
+                "alerts": watchlist_monitor.alert_history(limit=20),
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            signature = json.dumps(payload, sort_keys=True, default=str)
+            if signature != last_signature:
+                await response.write(await encode_sse("WATCHLIST_UPDATED", payload))
+                last_signature = signature
+            await response.write(await encode_sse("HEARTBEAT", {"updated_at": datetime.now().isoformat(timespec="seconds")}))
+            await asyncio.sleep(2)
+    except (asyncio.CancelledError, ClientConnectionResetError, ConnectionResetError):
+        logger.debug("Watchlist stream client disconnected")
+    except Exception as exc:
+        logger.warning(f"Watchlist stream ended: {exc}")
+    return response
+
+
+async def alert_history_api(request: web.Request) -> web.Response:
+    return web.json_response(
+        {
+            "status": "ok",
+            "alerts": watchlist_monitor.alert_history(
+                symbol=str(request.query.get("symbol") or ""),
+                alert_type=str(request.query.get("alert_type") or ""),
+                severity=str(request.query.get("severity") or ""),
+                action=str(request.query.get("action") or ""),
+                date=str(request.query.get("date") or ""),
+                telegram_sent=str(request.query.get("telegram_sent") or ""),
+                trade_taken=str(request.query.get("trade_taken") or ""),
+                limit=max(1, min(500, int(request.query.get("limit", "200") or 200))),
+            ),
+        },
+        dumps=lambda value: json.dumps(value, default=str),
+    )
+
+
+async def watchlist_history_api(request: web.Request) -> web.Response:
+    return await alert_history_api(request)
+
+
+async def alert_settings_api(request: web.Request) -> web.Response:
+    if request.method == "GET":
+        return web.json_response({"status": "ok", "settings": watchlist_monitor.get_settings()}, dumps=lambda value: json.dumps(value, default=str))
+    payload = await request.json()
+    settings = watchlist_monitor.update_settings(payload)
+    return web.json_response({"status": "ok", "settings": settings}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def alert_test_api(request: web.Request) -> web.Response:
+    payload = await request.json() if request.can_read_body else {}
+    symbol = normalize_stock_symbol(payload.get("symbol") or "TEST.NS")
+    alert = watchlist_monitor._alert(
+        symbol,
+        str(payload.get("alert_type") or "test_alert"),
+        str(payload.get("severity") or "medium"),
+        float(payload.get("trigger_price") or 0),
+        float(payload.get("breakout_level") or 0),
+        str(payload.get("message") or f"Test alert for {symbol}"),
+    )
+    watchlist_monitor.alerts.append(
+        {
+            "alert_id": f"test-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+            **alert,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "delivery_status": "test",
+            "telegram_sent": False,
+            "desktop_sent": bool(watchlist_monitor.settings.get("desktop_enabled", True)),
+            "user_action": "test",
+        }
+    )
+    watchlist_monitor.persist_alerts()
+    return web.json_response({"status": "ok", "alert": watchlist_monitor.alerts[-1]}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def stock_trade_plan(request: web.Request) -> web.Response:
+    symbol = normalize_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    scan_type = str(request.query.get("scan_type") or "intraday")
+    return web.json_response(ai_intelligence.generate_trade_plan(symbol, scan_type), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_insight_alias(request: web.Request) -> web.Response:
+    symbol = normalize_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    scan_type = str(request.query.get("scan_type") or "intraday")
+    return web.json_response(ai_intelligence.generate_stock_insight(symbol, scan_type), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ml_prediction_symbol(request: web.Request) -> web.Response:
+    symbol = normalize_symbol(request.match_info.get("symbol"))
+    if not symbol:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    timeframe = str(request.query.get("timeframe") or "intraday")
+    result = await asyncio.to_thread(build_meta_scan, timeframe)
+    matches = [
+        row for row in result.get("all_results", [])
+        if str(row.get("symbol") or row.get("stock") or "").upper() == symbol
+    ]
+    if not matches:
+        return web.json_response(
+            {
+                "status": "empty",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "message": "No ML/meta prediction exists for this symbol in latest scan cache.",
+            },
+            status=404,
+        )
+    row = matches[0]
+    return web.json_response(
+        {
+            "status": "ok",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "prediction": {
+                "ml_confidence": row.get("ml_confidence"),
+                "ai_confidence": row.get("ai_confidence"),
+                "backtest_score": row.get("backtest_score"),
+                "risk_score": row.get("risk_score"),
+                "meta_score": row.get("meta_score"),
+                "final_decision": row.get("final_decision"),
+                "reason": row.get("reason_selected") or row.get("reason_rejected") or row.get("reason"),
+                "data_freshness": row.get("data_freshness"),
+            },
+            "generated_at": result.get("generated_at"),
+        },
+        dumps=lambda value: json.dumps(value, default=str),
+    )
 
 
 async def v20_watchlist(request: web.Request) -> web.Response:
@@ -1567,6 +2593,150 @@ async def v20_saved_filters(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", **result})
 
 
+async def ai_market_summary(_: web.Request) -> web.Response:
+    return web.json_response(ai_intelligence.market_summary(), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_stock_insight(request: web.Request) -> web.Response:
+    symbol = normalize_symbol(request.match_info.get("symbol", ""))
+    scan_type = request.query.get("scan_type", "")
+    return web.json_response(ai_intelligence.generate_stock_insight(symbol, scan_type), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_stock_trade_plan(request: web.Request) -> web.Response:
+    symbol = normalize_symbol(request.match_info.get("symbol", ""))
+    scan_type = request.query.get("scan_type", "")
+    return web.json_response(ai_intelligence.generate_trade_plan(symbol, scan_type), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_scanner_insights(request: web.Request) -> web.Response:
+    scan_type = request.match_info.get("scan_type", "dashboard")
+    return web.json_response(ai_intelligence.scanner_insights(scan_type), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_watchlist_insights(_: web.Request) -> web.Response:
+    watch_rows = v20_store.rows(
+        """
+        SELECT s.symbol FROM watchlist_items wi
+        JOIN stocks s ON s.id = wi.stock_id
+        WHERE wi.watchlist_id = 1
+        ORDER BY wi.created_at DESC LIMIT 12
+        """
+    )
+    insights = [ai_intelligence.generate_stock_insight(row["symbol"], "watchlist") for row in watch_rows]
+    return web.json_response({"count": len(insights), "insights": insights}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_portfolio_insights(_: web.Request) -> web.Response:
+    holdings = v20_store.rows(
+        """
+        SELECT s.symbol, s.sector, ph.quantity, ph.average_price
+        FROM portfolio_holdings ph
+        JOIN stocks s ON s.id = ph.stock_id
+        WHERE ph.portfolio_id = 1
+        """
+    )
+    if not holdings:
+        return web.json_response({
+            "summary": "Insufficient data to generate reliable insight.",
+            "risks": ["No portfolio holdings are stored."],
+            "insights": [],
+        })
+    insights = [ai_intelligence.generate_stock_insight(row["symbol"], "portfolio") for row in holdings]
+    sectors: dict[str, float] = {}
+    for row in holdings:
+        sectors[row["sector"]] = sectors.get(row["sector"], 0) + float(row.get("quantity") or 0)
+    return web.json_response({"summary": f"Portfolio has {len(holdings)} holdings across {len(sectors)} sectors.", "sectorExposure": sectors, "insights": insights}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_daily_report(_: web.Request) -> web.Response:
+    return web.json_response({"summary": ai_intelligence.market_summary(), "scanner": ai_intelligence.scanner_insights("daily"), "generatedAt": datetime.now().isoformat(timespec="seconds")}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_copilot_query(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return web.json_response(ai_intelligence.copilot_query(str(payload.get("query") or "")), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_insights_refresh(_: web.Request) -> web.Response:
+    stocks = v20_store.stock_query({"limit": 20})
+    insights = [ai_intelligence.generate_stock_insight(row["symbol"], "refresh") for row in stocks[:10]]
+    return web.json_response({"status": "ok", "count": len(insights), "insights": insights}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def ai_alert_create(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    symbol = normalize_symbol(payload.get("symbol", ""))
+    alert_type = str(payload.get("alert_type") or "ai_rating_changed")
+    threshold = float(payload.get("threshold") or 0)
+    stock_rows = v20_store.rows("SELECT id FROM stocks WHERE symbol=?", (symbol,))
+    if not stock_rows:
+        return web.json_response({"status": "error", "message": "symbol not found"}, status=404)
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    result = v20_store.execute(
+        "INSERT INTO alerts(user_id, stock_id, alert_type, condition, threshold, active, created_at, updated_at) VALUES(1, ?, ?, ?, ?, 1, ?, ?)",
+        (stock_rows[0]["id"], alert_type, str(payload.get("condition") or "changed"), threshold, timestamp, timestamp),
+    )
+    return web.json_response({"status": "ok", "symbol": symbol, "alert_type": alert_type, **result})
+
+
+async def realtime_snapshot_warmer(app: web.Application):
+    async def loop() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(v20_store.realtime_payload)
+            except Exception as exc:
+                logger.warning(f"Realtime snapshot warmer skipped cycle: {exc}")
+            await asyncio.sleep(30)
+
+    task = asyncio.create_task(loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+async def v30_backfill_worker(app: web.Application):
+    task = asyncio.create_task(asyncio.to_thread(v30_store.backfill_saved_scans, 500))
+    try:
+        yield
+    finally:
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f"V30 background backfill ended with warning: {exc}")
+
+
+async def stock_data_worker(app: web.Application):
+    await stock_data_service.start()
+    try:
+        yield
+    finally:
+        await stock_data_service.stop()
+
+
+async def watchlist_monitor_worker(app: web.Application):
+    await watchlist_monitor.start()
+    try:
+        yield
+    finally:
+        await watchlist_monitor.stop()
+
+
 def create_app() -> web.Application:
     @web.middleware
     async def cors_middleware(request: web.Request, handler):
@@ -1582,14 +2752,57 @@ def create_app() -> web.Application:
 
     app = web.Application(client_max_size=2 * 1024 * 1024)
     app.middlewares.append(cors_middleware)
+    app.cleanup_ctx.append(v30_backfill_worker)
+    app.cleanup_ctx.append(realtime_snapshot_warmer)
+    app.cleanup_ctx.append(stock_data_worker)
+    app.cleanup_ctx.append(watchlist_monitor_worker)
     # Serve static assets (CSS, JS, images) from ui/static/
     app.router.add_static('/static/', path=str(BASE_DIR / 'static'), show_index=False)
     app.router.add_get("/", index)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/market/widgets", market_widgets)
+    app.router.add_get("/api/dashboard/live", dashboard_live)
+    app.router.add_get("/api/stream", v30_stream)
+    app.router.add_get("/api/opportunities/top", opportunity_top)
+    app.router.add_get("/api/opportunities/{kind}", opportunity_latest)
+    app.router.add_get("/api/scanners/{scan_type}/latest", scanner_latest_alias)
+    app.router.add_get("/api/search", stock_search)
+    app.router.add_get("/api/stocks/{symbol}", stock_detail)
+    app.router.add_get("/api/stocks/{symbol}/candles", stock_candles)
+    app.router.add_get("/api/stocks/{symbol}/stream", stock_stream)
+    app.router.add_get("/api/stocks/{symbol}/analysis", stock_analysis)
+    app.router.add_get("/api/stocks/{symbol}/trade-plan", stock_trade_plan)
+    app.router.add_get("/api/ai/insights/{symbol}", ai_insight_alias)
+    app.router.add_get("/api/ml/predictions/{symbol}", ml_prediction_symbol)
+    app.router.add_get("/api/watchlist", watchlist_items)
+    app.router.add_post("/api/watchlist", watchlist_items)
+    app.router.add_put("/api/watchlist/{symbol}", watchlist_item_update)
+    app.router.add_delete("/api/watchlist/{symbol}", watchlist_item_update)
+    app.router.add_get("/api/watchlist/status", watchlist_status)
+    app.router.add_get("/api/watchlist/history", watchlist_history_api)
+    app.router.add_get("/api/watchlist/stream", watchlist_stream)
+    app.router.add_get("/api/alerts", alert_history_api)
+    app.router.add_post("/api/alerts/test", alert_test_api)
+    app.router.add_get("/api/alerts/settings", alert_settings_api)
+    app.router.add_put("/api/alerts/settings", alert_settings_api)
     app.router.add_post("/api/scan", scan)
     app.router.add_post("/api/scan/start", start_scan)
+    app.router.add_post("/api/scans/{family}/run", run_dedicated_scan)
+    app.router.add_get("/api/scans/{family}/latest", dedicated_scan_latest)
+    app.router.add_get("/api/scans/{family}/{scan_id}/results", dedicated_scan_results)
+    app.router.add_get("/api/scans/pipeline/today", pipeline_today)
+    app.router.add_post("/api/scans/pipeline/prepare", pipeline_prepare)
+    app.router.add_post("/api/meta-scanner/run", meta_scanner_run)
+    app.router.add_get("/api/meta-scanner/latest", meta_scanner_latest)
+    app.router.add_get("/api/meta-scanner/conflicts", meta_scanner_conflicts)
+    app.router.add_get("/api/meta-scanner/agreements", meta_scanner_agreements)
+    app.router.add_get("/api/meta-scanner/{symbol}/details", meta_scanner_symbol_details)
+    app.router.add_get("/api/meta-scanner/{timeframe}", meta_scanner_timeframe)
+    app.router.add_get("/api/final-decisions/latest", final_decisions_latest)
+    app.router.add_get("/api/ml/predictions", ml_predictions_latest)
     app.router.add_get("/api/sources/groww/intraday", groww_intraday_source)
+    app.router.add_get("/api/sources/groww/intraday/analyze", groww_intraday_analyze)
+    app.router.add_post("/api/sources/groww/intraday/analyze", groww_intraday_analyze)
     app.router.add_post("/api/scan/stop", stop_scan)
     app.router.add_post("/api/scan/stop-all", stop_all_scans)
     app.router.add_post("/api/scan/pause", pause_scan)
@@ -1597,6 +2810,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/scan/active", active_scan)
     app.router.add_get("/api/scan/active/all", active_scans)
     app.router.add_get("/api/scan/{scan_id}/status", scan_status)
+    app.router.add_post("/api/v30/backfill-scans", v30_backfill_scans)
     app.router.add_get("/api/scans", scans)
     app.router.add_get("/api/scans/{scan_id}", scan_detail)
     app.router.add_get("/api/reports/{scan_id}/excel", report_excel)
@@ -1613,6 +2827,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/candlestick", candlestick_data)
     app.router.add_get("/api/export/watchlist", export_watchlist)
     app.router.add_get("/api/intraday/quick-signal/{symbol}", quick_intraday_signal)
+    app.router.add_get("/api/realtime/snapshot", realtime_snapshot)
     app.router.add_get("/api/v20/dashboard", v20_dashboard)
     app.router.add_get("/api/v20/stocks", v20_stocks)
     app.router.add_get("/api/v20/indices", v20_indices)
@@ -1638,6 +2853,16 @@ def create_app() -> web.Application:
     app.router.add_post("/api/v20/saved-scanners", v20_saved_scanners)
     app.router.add_get("/api/v20/saved-filters", v20_saved_filters)
     app.router.add_post("/api/v20/saved-filters", v20_saved_filters)
+    app.router.add_get("/api/ai/market-summary", ai_market_summary)
+    app.router.add_get("/api/ai/stock/{symbol}/insight", ai_stock_insight)
+    app.router.add_get("/api/ai/stock/{symbol}/trade-plan", ai_stock_trade_plan)
+    app.router.add_get("/api/ai/scanner/{scan_type}/insights", ai_scanner_insights)
+    app.router.add_get("/api/ai/watchlist/insights", ai_watchlist_insights)
+    app.router.add_get("/api/ai/portfolio/insights", ai_portfolio_insights)
+    app.router.add_get("/api/ai/reports/daily", ai_daily_report)
+    app.router.add_post("/api/ai/copilot/query", ai_copilot_query)
+    app.router.add_post("/api/ai/insights/refresh", ai_insights_refresh)
+    app.router.add_post("/api/ai/alerts/create", ai_alert_create)
     return app
 
 
