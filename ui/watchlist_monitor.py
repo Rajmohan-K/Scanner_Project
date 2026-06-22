@@ -29,10 +29,11 @@ DEFAULT_ALERT_SETTINGS: dict[str, Any] = {
     "telegram_enabled": False,
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    "min_profit_pct": 1.5,
     "breakout_distance_pct": 2.0,
-    "breakout_volume_multiplier": 2.0,
+    "breakout_volume_multiplier": 1.5,
     "consecutive_candle_count": 3,
-    "price_move_pct_threshold": 2.0,
+    "price_move_pct_threshold": 1.5,
     "half_percent_move_threshold": 0.5,
     "cooldown_seconds": 900,
     "intraday_monitoring": True,
@@ -48,9 +49,9 @@ DEFAULT_ALERT_SETTINGS: dict[str, Any] = {
     "confirmation_wait_until": "11:00",
     "stop_loss_min_pct": 1.0,
     "stop_loss_max_pct": 1.5,
-    "default_stop_loss_pct": 1.2,
-    "profit_booking_start_pct": 4.0,
-    "profit_booking_end_pct": 5.0,
+    "default_stop_loss_pct": 1.0,
+    "profit_booking_start_pct": 1.5,
+    "profit_booking_end_pct": 3.0,
     "book_partial_quantity_pct": 50.0,
     "gtt_plan_enabled": True,
     "future_auto_trade_enabled": False,
@@ -465,9 +466,10 @@ class WatchlistMonitor:
         sl_pct = min(max(_num(self.settings.get("default_stop_loss_pct"), 1.2), sl_min), sl_max)
         entry = _round_price(max(price, breakout_level) if breakout_level and price >= breakout_level else price)
         stop_loss = _round_price((entry or price) * (1 - sl_pct / 100)) if entry else None
-        target1 = _round_price((entry or price) * 1.02) if entry else None
-        target2 = _round_price((entry or price) * 1.04) if entry else None
-        target3 = _round_price((entry or price) * 1.06) if entry else None
+        min_profit = _num(self.settings.get("min_profit_pct"), 1.5)
+        target1 = _round_price((entry or price) * (1 + min_profit / 100)) if entry else None
+        target2 = _round_price((entry or price) * (1 + min_profit * 2 / 100)) if entry else None
+        target3 = _round_price((entry or price) * (1 + min_profit * 3 / 100)) if entry else None
         trade_plan = (analysis.get("intraday") or {}).get("tradePlan") or analysis.get("intraday_trade_plan") or {}
         if intraday_signal == "BUY":
             entry = _round_price(trade_plan.get("entry_price") or trade_plan.get("entry_trigger") or entry)

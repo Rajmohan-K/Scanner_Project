@@ -140,6 +140,8 @@ export default function WatchlistPage() {
   const [filterAction, setFilterAction] = useState('');
   const [filterAlerts, setFilterAlerts] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [checkedSymbols, setCheckedSymbols] = useState<string[]>([]);
+  const [displayLimit, setDisplayLimit] = useState<number | 'all'>('all');
 
   const [pinnedSymbols, setPinnedSymbols] = useState<string[]>(() => {
     if (typeof window !== 'undefined') {
@@ -381,6 +383,7 @@ export default function WatchlistPage() {
         symbol: symbolsString,
         monitoring_enabled: true,
         alerts_enabled: true,
+        notes: 'groww',
       });
       
       if (response.items) {
@@ -389,6 +392,58 @@ export default function WatchlistPage() {
       toast.push(`Successfully imported ${symbols.length} priority stocks from Groww source: ${symbols.join(', ')}`, 'success');
     } catch (err: any) {
       toast.push(err?.message || 'Failed to pull Groww stocks', 'error');
+    }
+  }
+
+  async function removeSelected() {
+    if (!checkedSymbols.length) {
+      toast.push('No stocks selected. Check the boxes next to symbols first.', 'warning');
+      return;
+    }
+    try {
+      const symbolsString = checkedSymbols.join(',');
+      await deleteWatchlistItem(symbolsString);
+      setItems((current) => current.filter((row) => !checkedSymbols.includes(row.symbol)));
+      setCheckedSymbols([]);
+      toast.push(`Removed ${checkedSymbols.length} selected stocks from watchlist`, 'success');
+    } catch (err: any) {
+      toast.push(err?.message || 'Failed to remove selected stocks', 'error');
+    }
+  }
+
+  async function removeGrowwStocks() {
+    const growwSymbols = items
+      .filter((row) => row.notes === 'groww' || row.notes?.toLowerCase() === 'groww source')
+      .map((row) => row.symbol);
+    if (!growwSymbols.length) {
+      toast.push('No Groww stocks found in active watchlist', 'info');
+      return;
+    }
+    try {
+      const symbolsString = growwSymbols.join(',');
+      await deleteWatchlistItem(symbolsString);
+      setItems((current) => current.filter((row) => !growwSymbols.includes(row.symbol)));
+      setCheckedSymbols((current) => current.filter((s) => !growwSymbols.includes(s)));
+      toast.push(`Removed ${growwSymbols.length} Groww stocks from watchlist`, 'success');
+    } catch (err: any) {
+      toast.push(err?.message || 'Failed to remove Groww stocks', 'error');
+    }
+  }
+
+  async function removeAllWatchlist() {
+    if (!items.length) {
+      toast.push('Watchlist is already empty', 'info');
+      return;
+    }
+    const allSymbols = items.map((row) => row.symbol);
+    try {
+      const symbolsString = allSymbols.join(',');
+      await deleteWatchlistItem(symbolsString);
+      setItems([]);
+      setCheckedSymbols([]);
+      toast.push('Cleared all symbols from watchlist monitor', 'success');
+    } catch (err: any) {
+      toast.push(err?.message || 'Failed to clear watchlist', 'error');
     }
   }
 
@@ -511,6 +566,7 @@ export default function WatchlistPage() {
           }}>
             <div className="settings-grid compact-settings-grid" style={{ margin: 0, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '6px' }}>
               {[
+                ['min_profit_pct', 'Min Profit %', 'Minimum profit breakout threshold.'],
                 ['breakout_distance_pct', 'Breakout Distance %', 'Near resistance alert zone.'],
                 ['breakout_volume_multiplier', 'Volume Multiplier', 'BUY volume multiplier.'],
                 ['consecutive_candle_count', 'Candle Count', 'Consecutive candle alerts.'],
@@ -600,12 +656,91 @@ export default function WatchlistPage() {
               </button>
             </div>
 
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px',
+              flexWrap: 'wrap',
+              marginBottom: '12px',
+              padding: '6px 12px',
+              background: 'rgba(0,0,0,0.15)',
+              border: '1px solid var(--border)',
+              borderRadius: '6px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.74rem', cursor: 'pointer', marginRight: '8px' }}>
+                  <input
+                    type="checkbox"
+                    checked={filteredItems.length > 0 && checkedSymbols.length === filteredItems.length}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setCheckedSymbols(filteredItems.map(item => item.symbol));
+                      } else {
+                        setCheckedSymbols([]);
+                      }
+                    }}
+                  />
+                  <span>Select All ({checkedSymbols.length} / {filteredItems.length})</span>
+                </label>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={removeSelected}
+                  disabled={!checkedSymbols.length}
+                  style={{ padding: '2px 8px', fontSize: '0.7rem', minHeight: '24px', opacity: checkedSymbols.length ? 1 : 0.6 }}
+                >
+                  Remove Selected
+                </button>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={removeGrowwStocks}
+                  style={{ padding: '2px 8px', fontSize: '0.7rem', minHeight: '24px' }}
+                >
+                  Remove Groww Stocks
+                </button>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={removeAllWatchlist}
+                  style={{ padding: '2px 8px', fontSize: '0.7rem', minHeight: '24px', background: 'rgba(255,100,100,0.05)', color: '#ff6b6b', border: '1px solid rgba(255,100,100,0.15)' }}
+                >
+                  Remove All
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem' }}>
+                <span style={{ color: 'var(--muted)' }}>Show:</span>
+                <select
+                  value={displayLimit}
+                  onChange={(e) => setDisplayLimit(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                  style={{
+                    padding: '2px 6px',
+                    fontSize: '0.74rem',
+                    background: 'var(--panel-strong)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text)',
+                    borderRadius: '4px',
+                  }}
+                >
+                  <option value="all">All</option>
+                  <option value={5}>Top 5</option>
+                  <option value={10}>Top 10</option>
+                  <option value={20}>Top 20</option>
+                  <option value={30}>Top 30</option>
+                  <option value={40}>Top 40</option>
+                  <option value={50}>Top 50</option>
+                </select>
+              </div>
+            </div>
+
             {filteredItems.length ? (
               <div className="terminal-table watchlist-monitor-table">
                  <div className="terminal-table-head">
-                  {['Symbol', 'Company', 'Price', 'Change %', 'Vol vs Avg', 'Breakout', 'Distance', 'Status', 'Readiness', 'Action', 'Suggested Time', 'Entry', 'SL', 'Target 1', 'Target 2', 'Target 3', 'GTT Plan', 'Profit Booking', 'Last Alert', 'Last Alert Price', 'Checked', 'Alert Enabled', 'Actions'].map((heading) => <span key={heading}>{heading}</span>)}
+                  {['', 'Symbol', 'Company', 'Price', 'Change %', 'Vol vs Avg', 'Breakout', 'Distance', 'Status', 'Readiness', 'Action', 'Suggested Time', 'Entry', 'SL', 'Target 1', 'Target 2', 'Target 3', 'GTT Plan', 'Profit Booking', 'Last Alert', 'Last Alert Price', 'Checked', 'Alert Enabled', 'Actions'].map((heading, i) => <span key={i}>{heading}</span>)}
                 </div>
-                {filteredItems.map((item) => {
+                {filteredItems.slice(0, displayLimit === 'all' ? undefined : displayLimit).map((item) => {
                   const snap = item.snapshot || {};
                   const isSelected = selected?.symbol === item.symbol;
                   return (
@@ -615,6 +750,19 @@ export default function WatchlistPage() {
                         onClick={() => setSelected(isSelected ? null : item)}
                         style={{ cursor: 'pointer' }}
                       >
+                        <span onClick={(e) => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <input 
+                            type="checkbox"
+                            checked={checkedSymbols.includes(item.symbol)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setCheckedSymbols((current) => [...current, item.symbol]);
+                              } else {
+                                setCheckedSymbols((current) => current.filter((s) => s !== item.symbol));
+                              }
+                            }}
+                          />
+                        </span>
                         <strong>
                           {pinnedSymbols.includes(item.symbol) && <Pin size={12} style={{ display: 'inline', marginRight: '4px', color: 'var(--accent)' }} />}
                           {item.symbol}
@@ -668,7 +816,7 @@ export default function WatchlistPage() {
                             padding: '10px 14px',
                             color: 'var(--text)',
                             width: '100%',
-                            minWidth: '2055px',
+                            minWidth: '2105px',
                             boxSizing: 'border-box'
                           }}
                         >

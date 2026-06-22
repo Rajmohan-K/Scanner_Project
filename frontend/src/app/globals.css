@@ -5091,8 +5091,8 @@ select option:checked {
 
 .watchlist-monitor-table .terminal-table-head,
 .watchlist-monitor-row {
-  min-width: 2055px;
-  grid-template-columns: 110px 120px 80px 70px 70px 80px 70px 100px 135px 85px 120px 80px 80px 80px 80px 80px 110px 110px 130px 90px 100px 80px 75px;
+  min-width: 2105px;
+  grid-template-columns: 50px 110px 120px 80px 70px 70px 80px 70px 100px 135px 85px 120px 80px 80px 80px 80px 80px 110px 110px 130px 90px 100px 80px 75px;
 }
 
 .alert-history-table .terminal-table-head,

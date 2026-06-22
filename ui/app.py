@@ -2235,14 +2235,27 @@ async def watchlist_items(request: web.Request) -> web.Response:
 
 
 async def watchlist_item_update(request: web.Request) -> web.Response:
-    symbol = normalize_stock_symbol(request.match_info.get("symbol"))
-    if not symbol:
-        raise web.HTTPBadRequest(text="valid symbol required")
+    symbol = request.match_info.get("symbol") or ""
     if request.method == "DELETE":
-        removed = watchlist_monitor.remove_item(symbol)
-        return web.json_response({"status": "ok", "removed": removed, "symbol": symbol})
+        if "," in symbol:
+            symbols = [normalize_stock_symbol(s) for s in symbol.split(",") if s.strip()]
+            removed_count = 0
+            for sym in symbols:
+                if watchlist_monitor.remove_item(sym):
+                    removed_count += 1
+            return web.json_response({"status": "ok", "removed_count": removed_count, "symbols": symbols})
+        else:
+            normalized = normalize_stock_symbol(symbol)
+            if not normalized:
+                raise web.HTTPBadRequest(text="valid symbol required")
+            removed = watchlist_monitor.remove_item(normalized)
+            return web.json_response({"status": "ok", "removed": removed, "symbol": normalized})
+
+    normalized = normalize_stock_symbol(symbol)
+    if not normalized:
+        raise web.HTTPBadRequest(text="valid symbol required")
     payload = await request.json()
-    item = await watchlist_monitor.update_item(symbol, payload)
+    item = await watchlist_monitor.update_item(normalized, payload)
     return web.json_response({"status": "ok", "item": item}, dumps=lambda value: json.dumps(value, default=str))
 
 

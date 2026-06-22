@@ -6,10 +6,11 @@ export const WATCHLIST_NOTIFIED_DESKTOP_KEY = 'scanner-watchlist-notified-deskto
 export const WATCHLIST_ALERT_EVENT = 'scanner-watchlist-alert';
 
 export const DEFAULT_WATCHLIST_ALERT_SETTINGS: AlertSettings = {
+  min_profit_pct: 1.5,
   breakout_distance_pct: 2,
-  breakout_volume_multiplier: 2,
+  breakout_volume_multiplier: 1.5,
   consecutive_candle_count: 3,
-  price_move_pct_threshold: 2,
+  price_move_pct_threshold: 1.5,
   half_percent_move_threshold: 0.5,
   cooldown_seconds: 900,
   monitoring_interval_seconds: 10,
@@ -24,9 +25,9 @@ export const DEFAULT_WATCHLIST_ALERT_SETTINGS: AlertSettings = {
   confirmation_wait_until: '11:00',
   stop_loss_min_pct: 1,
   stop_loss_max_pct: 1.5,
-  default_stop_loss_pct: 1.2,
-  profit_booking_start_pct: 4,
-  profit_booking_end_pct: 5,
+  default_stop_loss_pct: 1,
+  profit_booking_start_pct: 1.5,
+  profit_booking_end_pct: 3,
   book_partial_quantity_pct: 50,
   gtt_plan_enabled: true,
   future_auto_trade_enabled: false,
