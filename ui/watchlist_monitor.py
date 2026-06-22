@@ -18,11 +18,12 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 WATCHLIST_PATH = DATA_DIR / "watchlist_monitor.json"
 ALERTS_PATH = DATA_DIR / "alert_history.json"
 SETTINGS_PATH = DATA_DIR / "alert_settings.json"
+WATCHLIST_AUDIT_PATH = DATA_DIR / "watchlist_audit_history.json"
 
 
 DEFAULT_ALERT_SETTINGS: dict[str, Any] = {
     "desktop_enabled": True,
-    "sound_enabled": False,
+    "sound_enabled": True,
     "sound_type": "soft",
     "sound_volume": 35,
     "telegram_enabled": False,
@@ -40,6 +41,7 @@ DEFAULT_ALERT_SETTINGS: dict[str, Any] = {
     "market_hours_only": False,
     "severity_filter": "all",
     "watchlist_monitoring_enabled": True,
+    "groww_source_enabled": True,
     "no_breakout_first_30_minutes": True,
     "first_30_minutes_wait_until": "09:45",
     "wait_until_11am_confirmation": True,
@@ -95,9 +97,11 @@ class WatchlistMonitor:
     def __init__(self) -> None:
         self.items: dict[str, dict[str, Any]] = {}
         self.alerts: list[dict[str, Any]] = []
+        self.audit_history: list[dict[str, Any]] = []
         self.settings: dict[str, Any] = {}
         self.status: dict[str, Any] = {"running": False, "last_checked": "", "enabled_symbols": 0}
         self.last_triggered: dict[str, float] = {}
+        self._pending_alerts: list[dict[str, Any]] = []
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self.load()
@@ -106,6 +110,7 @@ class WatchlistMonitor:
         raw_items = _read_json(WATCHLIST_PATH, [])
         self.items = {normalize_stock_symbol(row.get("symbol")): row for row in raw_items if row.get("symbol")}
         self.alerts = _read_json(ALERTS_PATH, [])
+        self.audit_history = _read_json(WATCHLIST_AUDIT_PATH, [])
         self.settings = {**DEFAULT_ALERT_SETTINGS, **_read_json(SETTINGS_PATH, {})}
 
     def persist_items(self) -> None:
@@ -114,8 +119,22 @@ class WatchlistMonitor:
     def persist_alerts(self) -> None:
         _write_json(ALERTS_PATH, self.alerts[-500:])
 
+    def persist_audit_history(self) -> None:
+        _write_json(WATCHLIST_AUDIT_PATH, self.audit_history[-500:])
+
     def persist_settings(self) -> None:
         _write_json(SETTINGS_PATH, self.settings)
+
+    def drain_pending_alerts(self) -> list[dict[str, Any]]:
+        pending = list(self._pending_alerts)
+        self._pending_alerts.clear()
+        return pending
+
+    def clear_alerts(self) -> None:
+        self.alerts.clear()
+        self._pending_alerts.clear()
+        self.last_triggered.clear()
+        self.persist_alerts()
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -168,6 +187,7 @@ class WatchlistMonitor:
             item["snapshot"] = self._unavailable_snapshot(item, str(exc))
             item["last_checked"] = _now()
             item["updated_at"] = _now()
+            item["monitoring_enabled"] = False
             self.items[symbol] = item
             self.persist_items()
         return item
@@ -262,6 +282,29 @@ class WatchlistMonitor:
             await asyncio.sleep(max(3, int(_num(self.settings.get("monitoring_interval_seconds"), 10))))
 
     async def monitor_once(self) -> dict[str, Any]:
+        # Auto-fetch Groww stocks if option is enabled
+        now_ts = time.time()
+        if self.settings.get("groww_source_enabled", False) and (now_ts - getattr(self, "last_groww_fetch", 0) > 300):
+            self.last_groww_fetch = now_ts
+            try:
+                from ui.app import _fetch_groww_intraday_rows
+                payload = _fetch_groww_intraday_rows(limit=40)
+                rows = payload.get("rows", [])
+                symbols_to_add = [row["symbol"] for row in rows if row.get("symbol")]
+                if symbols_to_add:
+                    logger.info(f"Auto-importing {len(symbols_to_add)} symbols from Groww source to watchlist")
+                    for symbol in symbols_to_add:
+                        if symbol not in self.items:
+                            item_payload = {
+                                "symbol": symbol,
+                                "monitoring_enabled": True,
+                                "alerts_enabled": True,
+                                "settings": {"suggested_time": "After VWAP/volume confirmation; avoid fresh entry near close"}
+                            }
+                            await self.add_item(item_payload)
+            except Exception as exc:
+                logger.warning(f"Failed to auto-fetch stocks from Groww source: {exc}")
+
         enabled = [row for row in self.items.values() if row.get("monitoring_enabled", True)]
         self.status = {"running": bool(enabled), "last_checked": _now(), "enabled_symbols": len(enabled)}
         if not enabled:
@@ -285,9 +328,15 @@ class WatchlistMonitor:
         symbol = normalize_stock_symbol(item.get("symbol"))
         analysis = await stock_data_service.get_analysis(symbol, allow_stale=True)
         if analysis.get("status") == "error":
-            item["snapshot"] = self._unavailable_snapshot(item, analysis.get("message") or "Stock data unavailable")
+            message = analysis.get("message") or "Stock data unavailable"
+            item["snapshot"] = self._unavailable_snapshot(item, message)
             item["last_checked"] = _now()
             item["updated_at"] = _now()
+            # Disable monitoring for invalid, delisted, or missing stocks to prevent continuous polling
+            msg_lower = message.lower()
+            if any(term in msg_lower for term in ("delisted", "not found", "invalid", "unavailable", "no candle data", "no market data")):
+                item["monitoring_enabled"] = False
+                logger.warning(f"Automatically disabled monitoring for {symbol} due to persistent data error: {message}")
             self.items[symbol] = item
             return
         stock = analysis.get("stock") or await stock_data_service.get_stock(symbol, allow_stale=True)
@@ -300,6 +349,7 @@ class WatchlistMonitor:
         self.items[symbol] = item
         for alert in self._evaluate_alerts(item, snapshot):
             await self._record_alert(item, alert)
+        await self._check_and_archive_hit(item, snapshot)
 
     def _build_snapshot(self, item: dict[str, Any], stock: dict[str, Any], analysis: dict[str, Any], candles: list[dict[str, Any]]) -> dict[str, Any]:
         quote = analysis.get("quote") or stock.get("quote") or {}
@@ -387,6 +437,7 @@ class WatchlistMonitor:
             "target3": None,
             "gtt_plan": None,
             "profit_booking_status": "Unavailable",
+            "suggested_time": "Unavailable",
             "manual_confirmation_required": True,
             "auto_trade_enabled": False,
         }
@@ -498,6 +549,16 @@ class WatchlistMonitor:
                 "risk_amount_placeholder": item.get("risk_amount_placeholder") or "",
                 "note": "Use Groww GTT manually for Target/SL",
             }
+        suggested_time = item.get("suggested_time") or item.get("settings", {}).get("suggested_time")
+        if not suggested_time:
+            first_ends = self.settings.get("first_30_minutes_wait_until") or "09:45"
+            confirm_after = self.settings.get("confirmation_wait_until") or "11:00"
+            if self.settings.get("wait_until_11am_confirmation", True):
+                suggested_time = f"After {confirm_after} (11 AM confirmation window)"
+            elif self.settings.get("no_breakout_first_30_minutes", True):
+                suggested_time = f"After {first_ends} (opening wait window)"
+            else:
+                suggested_time = "09:15 - 11:30 (Opening momentum window)"
         return {
             "trade_readiness": readiness,
             "action": action,
@@ -510,6 +571,7 @@ class WatchlistMonitor:
             "target3": target3 if action != "AVOID" else None,
             "gtt_plan": gtt_plan if action != "AVOID" else None,
             "profit_booking_status": profit_booking_status,
+            "suggested_time": suggested_time,
             "manual_confirmation_required": True,
             "auto_trade_enabled": False,
             "trade_reason": "; ".join(reason_parts),
@@ -694,8 +756,9 @@ class WatchlistMonitor:
             except (TelegramDeliveryError, Exception) as exc:
                 record["delivery_status"] = f"telegram_failed: {exc}"
         else:
-            record["delivery_status"] = "desktop_ready" if record["desktop_sent"] else "stored"
+            record["delivery_status"] = "pending_ui" if record["desktop_sent"] else "stored"
         self.alerts.append(record)
+        self._pending_alerts.append(record)
         item["last_alert"] = record["message"]
         item["last_alert_at"] = record["created_at"]
         item["last_alert_price"] = record.get("trigger_price")
@@ -721,6 +784,96 @@ class WatchlistMonitor:
             + "".join(f"{label}: Rs {_format_price(value)}\n" for label, value in targets)
             + "\nNote:\nAuto buy/sell disabled. Place order manually in Groww if you accept the trade."
         )
+
+    async def _check_and_archive_hit(self, item: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+        symbol = normalize_stock_symbol(item.get("symbol"))
+        breakout_level = _num(snapshot.get("breakout_level"))
+        price = _num(snapshot.get("current_price"))
+        if price <= 0:
+            return False
+
+        # State machine to determine if trade has been entered (triggered)
+        if not item.get("trade_entered"):
+            should_enter = False
+            if not breakout_level:
+                should_enter = True
+            elif price >= breakout_level:
+                should_enter = True
+            elif item.get("manual_trade_taken"):
+                should_enter = True
+
+            if should_enter:
+                item["trade_entered"] = True
+                item["trade_entry_price"] = price
+                item["trade_entered_at"] = _now()
+                self.items[symbol] = item
+                logger.info(f"Watchlist trade automatically entered for {symbol} at {price}")
+
+        if item.get("trade_entered"):
+            entry_price = _num(item.get("trade_entry_price") or snapshot.get("entry") or price)
+            stop_loss = _num(snapshot.get("stop_loss"))
+            target1 = _num(snapshot.get("target1"))
+            target2 = _num(snapshot.get("target2"))
+            target3 = _num(snapshot.get("target3"))
+
+            is_sl_hit = stop_loss > 0 and price <= stop_loss
+            is_target_hit = target1 > 0 and price >= target1
+
+            if is_sl_hit or is_target_hit:
+                outcome = "Target Hit" if is_target_hit else "Stoploss Hit"
+                hit_details = ""
+                if is_sl_hit:
+                    hit_details = f"Stoploss hit at {price:.2f} (SL: {stop_loss:.2f})"
+                else:
+                    reached_targets = []
+                    if target1 > 0 and price >= target1: reached_targets.append(f"T1 ({target1:.2f})")
+                    if target2 > 0 and price >= target2: reached_targets.append(f"T2 ({target2:.2f})")
+                    if target3 > 0 and price >= target3: reached_targets.append(f"T3 ({target3:.2f})")
+                    hit_details = f"Target reached: {', '.join(reached_targets)} at {price:.2f}"
+
+                pl_pct = ((price - entry_price) / entry_price * 100) if entry_price else 0.0
+
+                audit_record = {
+                    "audit_id": uuid.uuid4().hex,
+                    "symbol": symbol,
+                    "company_name": item.get("company_name") or snapshot.get("company_name") or symbol,
+                    "outcome": outcome,
+                    "entry_price": entry_price,
+                    "exit_price": price,
+                    "stop_loss": stop_loss,
+                    "target1": target1,
+                    "target2": target2,
+                    "target3": target3,
+                    "profit_loss_pct": round(pl_pct, 2),
+                    "volume_spike": snapshot.get("volume_spike"),
+                    "trade_reason": snapshot.get("trade_reason") or snapshot.get("reason") or "",
+                    "entered_at": item.get("trade_entered_at") or item.get("created_at") or _now(),
+                    "archived_at": _now(),
+                    "hit_details": hit_details,
+                    "suggested_time": snapshot.get("suggested_time") or "09:45 AM - 11:00 AM",
+                }
+
+                self.audit_history.append(audit_record)
+                self.persist_audit_history()
+
+                # Generate high-severity alert for trade outcome
+                hit_alert = self._alert(
+                    symbol,
+                    "TRADE_COMPLETED_AUDIT",
+                    "high",
+                    price,
+                    breakout_level or 0.0,
+                    f"TRADE COMPLETED: {symbol} archived with {outcome}. {hit_details}. Net PnL: {pl_pct:.2f}%.",
+                    action="EXIT",
+                    snapshot=snapshot
+                )
+                await self._record_alert(item, hit_alert)
+
+                # Remove from active watchlist
+                self.remove_item(symbol)
+                logger.info(f"Watchlist item {symbol} archived to outcomes audit history due to {outcome}")
+                return True
+        return False
 
 
 watchlist_monitor = WatchlistMonitor()

@@ -326,7 +326,7 @@ function StockGridComponent({
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => onDrop(e, absoluteIndex)}
           >
-            {column('Symbol', <span data-label="Symbol"><strong>{symbol}</strong><small>{item.stock || dash}</small></span>)}
+            {column('Symbol', <span data-label="Symbol"><strong>{symbol}</strong></span>)}
             {column('Sector', <span data-label="Sector">{item.sector || dash}<small>{item.industry || ''}</small></span>)}
             {column('LTP', <span data-label="LTP" className="mono">INR {formatPrice(item.live_price)}</span>)}
             {column('Entry', <span data-label="Entry" className="mono">{formatPrice(item.entry_price)}</span>)}
@@ -344,32 +344,136 @@ function StockGridComponent({
             </span>)}
             {column('Updated', <span data-label="Updated">{item.last_updated || dash}<small>{item.generated_at || ''}</small></span>)}
             {column('Actions', <span data-label="Actions" className="row-actions">
-              <button className="icon-button" title={pinLabel} type="button" onClick={(event) => { event.stopPropagation(); handlePrimaryPin(item); }}><Pin size={15} /></button>
-              <button className="icon-button" title="Add to dashboard live monitor" type="button" onClick={(event) => { event.stopPropagation(); addToDashboardMonitor(item); }}><BellPlus size={15} /></button>
-              <button className="icon-button" title="Push to intraday custom scan" type="button" onClick={(event) => { event.stopPropagation(); pushSymbolToScanner('intraday', symbol); }}><ArrowRightLeft size={15} /></button>
-              <button className="icon-button" title="Push to swing custom scan" type="button" onClick={(event) => { event.stopPropagation(); pushSymbolToScanner('swing', symbol); }}><Star size={15} /></button>
-              <button className="icon-button" title="Add to compare" type="button" onClick={(event) => { event.stopPropagation(); addToCompare(symbol); }}><GitCompare size={15} /></button>
-              <button className="icon-button" title="Open detailed analysis JSON" type="button" onClick={(event) => { event.stopPropagation(); openChart(symbol); }}><Telescope size={15} /></button>
-              <button className="icon-button" title="Export this row" type="button" onClick={(event) => { event.stopPropagation(); exportSingleRow(item); }}><FileDown size={15} /></button>
-              <button className="icon-button" title="Export watchlist report" type="button" onClick={(event) => { event.stopPropagation(); openReportExport(); }}><BarChart3 size={15} /></button>
+              <button className="icon-button" title={pinLabel} type="button" onClick={(event) => { event.stopPropagation(); handlePrimaryPin(item); }}><Pin size={13} /></button>
+              <button className="icon-button" title="Add to dashboard live monitor" type="button" onClick={(event) => { event.stopPropagation(); addToDashboardMonitor(item); }}><BellPlus size={13} /></button>
+              <button className="icon-button" title="Push to intraday custom scan" type="button" onClick={(event) => { event.stopPropagation(); pushSymbolToScanner('intraday', symbol); }}><ArrowRightLeft size={13} /></button>
+              <button className="icon-button" title="Push to swing custom scan" type="button" onClick={(event) => { event.stopPropagation(); pushSymbolToScanner('swing', symbol); }}><Star size={13} /></button>
+              <button className="icon-button" title="Add to compare" type="button" onClick={(event) => { event.stopPropagation(); addToCompare(symbol); }}><GitCompare size={13} /></button>
+              <button className="icon-button" title="Open detailed analysis JSON" type="button" onClick={(event) => { event.stopPropagation(); openChart(symbol); }}><Telescope size={13} /></button>
+              <button className="icon-button" title="Export this row" type="button" onClick={(event) => { event.stopPropagation(); exportSingleRow(item); }}><FileDown size={13} /></button>
+              <button className="icon-button" title="Export watchlist report" type="button" onClick={(event) => { event.stopPropagation(); openReportExport(); }}><BarChart3 size={13} /></button>
             </span>)}
           </div>
           {selected && (
-            <div className="selected-stock-detail selected-stock-detail--inline">
-              <div>
-                <span>Selected Stock Reason</span>
-                <strong>{symbol}</strong>
-              </div>
-              <p>{fullReason(item)}</p>
-              <div className="selected-stock-actions">
-                <button className="btn-secondary" type="button" onClick={() => handlePrimaryPin(item)}><Pin size={15} /> Pin</button>
-                <button className="btn-secondary" type="button" onClick={() => addToDashboardMonitor(item)}><BellPlus size={15} /> Monitor</button>
-                <button className="btn-secondary" type="button" onClick={() => pushSymbolToScanner('intraday', symbol)}><ArrowRightLeft size={15} /> Intraday</button>
-                <button className="btn-secondary" type="button" onClick={() => pushSymbolToScanner('swing', symbol)}><Star size={15} /> Swing</button>
-                <button className="btn-secondary" type="button" onClick={() => addToCompare(symbol)}><GitCompare size={15} /> Compare</button>
-                <button className="btn-secondary" type="button" onClick={() => openChart(symbol)}><Telescope size={15} /> Chart</button>
-                <button className="btn-secondary" type="button" onClick={() => exportSingleRow(item)}><FileDown size={15} /> CSV</button>
-                <button className="icon-button" type="button" title="Close details" onClick={() => setSelectedStock(null)}>x</button>
+            <div 
+              className="custom-stock-detail-inline" 
+              onClick={(e) => e.stopPropagation()}
+              style={{ 
+                gridColumn: '1 / -1', 
+                background: 'rgba(10, 20, 35, 0.96)', 
+                borderTop: '1px solid var(--accent)', 
+                borderBottom: '1px solid var(--accent)', 
+                padding: '10px 14px',
+                color: 'var(--text)',
+                width: '100%',
+                boxSizing: 'border-box'
+              }}
+            >
+              <div style={{
+                position: 'sticky',
+                left: '20px',
+                maxWidth: '1200px',
+                width: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '8px',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: '6px' }}>
+                  <h3 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <strong style={{ color: 'var(--accent)' }}>{symbol}</strong>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--muted)' }}>{item.sector || dash} {item.industry ? `| ${item.industry}` : ''}</span>
+                  </h3>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    <button className="btn-secondary" type="button" onClick={() => handlePrimaryPin(item)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>
+                      <Pin size={11} /> {pinLabel}
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => addToDashboardMonitor(item)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>
+                      <BellPlus size={11} /> Monitor
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => pushSymbolToScanner('intraday', symbol)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>
+                      <ArrowRightLeft size={11} /> Intraday
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => pushSymbolToScanner('swing', symbol)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>
+                      <Star size={11} /> Swing
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => addToCompare(symbol)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>
+                      <GitCompare size={11} /> Compare
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => openChart(symbol)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>
+                      <Telescope size={11} /> Chart
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => exportSingleRow(item)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>
+                      <FileDown size={11} /> CSV
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => setSelectedStock(null)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px', background: 'rgba(255, 100, 100, 0.1)', color: '#ff6b6b', border: '1px solid rgba(255, 100, 100, 0.2)' }}>
+                      Close
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.1fr 0.9fr', gap: '16px' }}>
+                  {/* Column 1: Analysis & Recommendation */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '0.62rem', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--accent)' }}>Analysis & Signals</span>
+                      <span className={`status-badge status-${item.trend?.toLowerCase().includes('bear') ? 'bad' : 'good'}`} style={{ fontSize: '0.64rem', padding: '1px 4px', textTransform: 'uppercase', borderRadius: '3px' }}>{item.trend || 'Trend pending'}</span>
+                      {item.pattern && <span className="status-badge status-info" style={{ fontSize: '0.64rem', padding: '1px 4px', textTransform: 'uppercase', borderRadius: '3px' }}>Pattern: {item.pattern}</span>}
+                    </div>
+                    <p style={{ margin: 0, fontSize: '0.76rem', lineHeight: '1.35', color: 'var(--text)', opacity: 0.9 }}>
+                      {fullReason(item)}
+                    </p>
+                  </div>
+
+                  {/* Column 2: Key Levels & Targets */}
+                  <div>
+                    <span style={{ fontSize: '0.62rem', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--accent)', display: 'block', marginBottom: '4px' }}>Key Levels & Targets</span>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 8px', fontSize: '0.74rem' }}>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>LTP / Entry</span>
+                        <strong>INR {formatPrice(item.live_price)} / {formatPrice(item.entry_price)}</strong>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>Stop Loss</span>
+                        <strong style={{ color: 'var(--negative)' }}>{formatPrice(item.stop_loss)} ({typeof item.stop_distance_pct === 'number' ? `${item.stop_distance_pct.toFixed(1)}%` : dash})</strong>
+                      </div>
+                      <div style={{ gridColumn: 'span 2' }}>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>Targets (1 / 2 / 3)</span>
+                        <strong>{formatPrice(item.target1)} / {formatPrice(item.target2)} / {formatPrice(item.target3)}</strong>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>R:R Ratio</span>
+                        <strong>{item.rrr || dash}</strong>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>Expected Return</span>
+                        <strong style={{ color: 'var(--success)' }}>{typeof item.expected_return === 'number' ? `${item.expected_return.toFixed(1)}%` : dash}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Column 3: Scores & Quality Metrics */}
+                  <div>
+                    <span style={{ fontSize: '0.62rem', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--accent)', display: 'block', marginBottom: '4px' }}>Scores & Metrics</span>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 8px', fontSize: '0.74rem' }}>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>ML / Technical</span>
+                        <strong>{formatScore(item.ml_score)} / {formatScore(item.technical_score)}</strong>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>Confidence / Data</span>
+                        <strong>{formatScore(item.confidence_pct)} / {formatScore(item.data_reliability_score)}</strong>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>Fund. Score</span>
+                        <strong>{formatScore(item.fundamental_score)}</strong>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.6rem', color: 'var(--muted)', display: 'block' }}>Quality Filter</span>
+                        <strong style={{ color: item.quality_filter_passed === false ? 'var(--negative)' : 'var(--success)' }}>{item.quality_filter_passed === false ? 'Failed' : 'Passed'}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}

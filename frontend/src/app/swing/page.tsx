@@ -1,7 +1,7 @@
 "use client";
 import React, { useMemo, useState } from 'react';
 import { useSelector } from 'react-redux';
-import { CalendarClock, Pin, LineChart, Play, ShieldCheck, Target } from 'lucide-react';
+import { CalendarClock, Pin, LineChart, Play, Settings2, ShieldCheck, Target } from 'lucide-react';
 import StockGrid from '@/components/molecules/LazyStockGrid';
 import { RootState } from '@/state/store';
 import { getActiveScans, getLatestScanWithResults, getV20Quote, sendTelegramStockAlert, startScan } from '@/lib/api';
@@ -22,6 +22,8 @@ export default function SwingPage() {
   const [query, setQuery] = useState('');
   const [customSymbols, setCustomSymbols] = useState('RELIANCE.NS, TCS.NS');
   const [loading, setLoading] = useState(false);
+  const [showScanParams, setShowScanParams] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
   const [displayLimit, setDisplayLimit] = useState(10);
   const [activeScans, setActiveScans] = useState<any[]>([]);
   const [selectedMonitor, setSelectedMonitor] = useState<any[]>([]);
@@ -431,24 +433,69 @@ export default function SwingPage() {
         <MetricTile label="Review Cadence" value="Daily" detail="from swing settings" icon={CalendarClock} tone="info" />
       </div>
 
-      <TerminalPanel eyebrow="Custom Swing Scan" title="Selected Stocks Scanner">
-        <div className="scan-entry-grid">
-          <label className="field field--wide">
-            <span>Stocks To Scan</span>
-            <textarea value={customSymbols} onChange={(event) => setCustomSymbols(event.target.value)} placeholder="Enter live symbols separated by commas" rows={3} />
-          </label>
-          <label className="field">
-            <span>Stop Loss Method</span>
-            <select value={filters.stopMethod} onChange={(event) => setFilters((current) => ({ ...current, stopMethod: event.target.value }))}><option>Swing low / resistance invalidation</option><option>1.5x ATR</option><option>20 EMA close invalidation</option></select>
-          </label>
-          <label className="field">
-            <span>Target Plan</span>
-            <select value={filters.targetPlan} onChange={(event) => setFilters((current) => ({ ...current, targetPlan: event.target.value }))}><option>T1 1R / T2 2R</option><option>T1 resistance / T2 measured move</option><option>T1 1.5R / T2 3R</option></select>
-          </label>
-          <div className="field field--actions">
-            <span>Action</span>
-            <button className="btn-primary" onClick={handleRunSwingScan}><Play size={15} /> {loading ? 'Start Another' : 'Run Swing Scan'}</button>
+      <TerminalPanel 
+        eyebrow="Custom Swing Scan" 
+        title="Selected Stocks Scanner"
+        actions={
+          <button 
+            className="btn-secondary" 
+            type="button" 
+            onClick={() => setShowScanParams(!showScanParams)}
+            style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}
+          >
+            {showScanParams ? 'Hide Settings' : 'Configure Parameters'}
+          </button>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '4px 8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Stocks To Scan:</span>
+            <input 
+              value={customSymbols} 
+              onChange={(event) => setCustomSymbols(event.target.value)} 
+              placeholder="RELIANCE.NS, TCS.NS"
+              style={{ 
+                padding: '3px 6px', 
+                fontSize: '0.76rem', 
+                width: '300px', 
+                background: 'var(--panel-strong)', 
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                color: 'var(--text)'
+              }}
+            />
+            <button className="btn-primary" onClick={handleRunSwingScan} style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}><Play size={11} /> {loading ? 'Running...' : 'Run Swing Scan'}</button>
           </div>
+
+          {showScanParams && (
+            <div style={{ 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', 
+              gap: '8px',
+              background: 'var(--surface-3)',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              padding: '10px',
+              marginTop: '4px'
+            }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '1px', fontSize: '0.65rem' }}>
+                <span style={{ color: 'var(--muted)', fontWeight: 700 }}>Stop Loss Method</span>
+                <select value={filters.stopMethod} onChange={(event) => setFilters((current) => ({ ...current, stopMethod: event.target.value }))} style={{ padding: '2px 4px', fontSize: '0.74rem', background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}>
+                  <option>Swing low / resistance invalidation</option>
+                  <option>1.5x ATR</option>
+                  <option>20 EMA close invalidation</option>
+                </select>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '1px', fontSize: '0.65rem' }}>
+                <span style={{ color: 'var(--muted)', fontWeight: 700 }}>Target Plan</span>
+                <select value={filters.targetPlan} onChange={(event) => setFilters((current) => ({ ...current, targetPlan: event.target.value }))} style={{ padding: '2px 4px', fontSize: '0.74rem', background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}>
+                  <option>T1 1R / T2 2R</option>
+                  <option>T1 resistance / T2 measured move</option>
+                  <option>T1 1.5R / T2 3R</option>
+                </select>
+              </label>
+            </div>
+          )}
         </div>
       </TerminalPanel>
 
@@ -519,16 +566,31 @@ export default function SwingPage() {
         {!selectedMonitor.length && <p className="small">Select swing candidates to monitor stop loss and target approach.</p>}
       </TerminalPanel>
 
-      <TerminalPanel eyebrow="Dual-Panel Scanner" title="Latest Swing Custom Filtered Stocks">
+      <TerminalPanel 
+        eyebrow="Dual-Panel Scanner" 
+        title="Latest Swing Custom Filtered Stocks"
+        actions={
+          <button 
+            className="btn-secondary" 
+            type="button" 
+            onClick={() => setShowFilters(!showFilters)}
+            style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}
+          >
+            {showFilters ? 'Hide Filters' : 'Configure Filters'}
+          </button>
+        }
+      >
         <Toolbar search={query} setSearch={setQuery} />
-        <div className="form-grid">
-          <label className="field"><span>Trend Filter</span><select value={filters.trend} onChange={(event) => setFilters((current) => ({ ...current, trend: event.target.value }))}><option>Uptrend or base breakout</option><option>Pullback to support</option><option>RS outperformer</option></select></label>
-          <label className="field"><span>Support Distance</span><select value={filters.supportDistance} onChange={(event) => setFilters((current) => ({ ...current, supportDistance: event.target.value }))}><option>{'<= 2%'}</option><option>{'<= 3%'}</option><option>{'<= 5%'}</option></select></label>
-          <label className="field"><span>Minimum R:R</span><select value={filters.minRr} onChange={(event) => setFilters((current) => ({ ...current, minRr: event.target.value }))}><option>{'>= 1.5R'}</option><option>{'>= 2R'}</option><option>{'>= 3R'}</option></select></label>
-          <label className="field"><span>Risk Score</span><select value={filters.riskScore} onChange={(event) => setFilters((current) => ({ ...current, riskScore: event.target.value }))}><option>{'<= 35'}</option><option>{'<= 50'}</option><option>{'<= 65'}</option></select></label>
-          <label className="field"><span>Holding Window</span><select value={filters.holdingWindow} onChange={(event) => setFilters((current) => ({ ...current, holdingWindow: event.target.value }))}><option>2-5 sessions</option><option>2-10 sessions</option><option>1-4 weeks</option></select></label>
-          <label className="field"><span>Fundamentals</span><select value={filters.fundamentals} onChange={(event) => setFilters((current) => ({ ...current, fundamentals: event.target.value }))}><option>Positive or neutral</option><option>Strong only</option><option>Ignore</option></select></label>
-        </div>
+        {showFilters && (
+          <div className="form-grid">
+            <label className="field"><span>Trend Filter</span><select value={filters.trend} onChange={(event) => setFilters((current) => ({ ...current, trend: event.target.value }))}><option>Uptrend or base breakout</option><option>Pullback to support</option><option>RS outperformer</option></select></label>
+            <label className="field"><span>Support Distance</span><select value={filters.supportDistance} onChange={(event) => setFilters((current) => ({ ...current, supportDistance: event.target.value }))}><option>{'<= 2%'}</option><option>{'<= 3%'}</option><option>{'<= 5%'}</option></select></label>
+            <label className="field"><span>Minimum R:R</span><select value={filters.minRr} onChange={(event) => setFilters((current) => ({ ...current, minRr: event.target.value }))}><option>{'>= 1.5R'}</option><option>{'>= 2R'}</option><option>{'>= 3R'}</option></select></label>
+            <label className="field"><span>Risk Score</span><select value={filters.riskScore} onChange={(event) => setFilters((current) => ({ ...current, riskScore: event.target.value }))}><option>{'<= 35'}</option><option>{'<= 50'}</option><option>{'<= 65'}</option></select></label>
+            <label className="field"><span>Holding Window</span><select value={filters.holdingWindow} onChange={(event) => setFilters((current) => ({ ...current, holdingWindow: event.target.value }))}><option>2-5 sessions</option><option>2-10 sessions</option><option>1-4 weeks</option></select></label>
+            <label className="field"><span>Fundamentals</span><select value={filters.fundamentals} onChange={(event) => setFilters((current) => ({ ...current, fundamentals: event.target.value }))}><option>Positive or neutral</option><option>Strong only</option><option>Ignore</option></select></label>
+          </div>
+        )}
         <div className="quick-pick-list">
           <select value={displayLimit} onChange={(event) => setDisplayLimit(Number(event.target.value))}><option value={10}>Top 10</option><option value={25}>Top 25</option></select>
           {visibleSwingItems.slice(0, 12).map((stock: any) => {

@@ -1,7 +1,7 @@
 "use client";
 import React, { useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { Activity, Crosshair, Download, Play, ScanLine, Star, TrendingUp } from 'lucide-react';
+import { Activity, Crosshair, Download, Play, ScanLine, Settings2, Star, TrendingUp } from 'lucide-react';
 import StockGrid from '@/components/molecules/LazyStockGrid';
 import { getActiveScans, getLatestScanWithResults, getLiveStockAnalysis, getV20Quote, sendTelegramStockAlert, startScan } from '@/lib/api';
 import { useRealtime } from '@/hooks/useRealtime';
@@ -35,6 +35,8 @@ export default function IntradayPage() {
   const [quickSignalLoading, setQuickSignalLoading] = useState(false);
   const [quickSignalError, setQuickSignalError] = useState('');
   const [selectedScanRows, setSelectedScanRows] = useState<any[]>([]);
+  const [showConfig, setShowConfig] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
   const alertedSymbols = React.useRef<Set<string>>(new Set());
   const sourceRef = React.useRef<any[]>([]);
   const latestLoadInFlightRef = React.useRef(false);
@@ -480,36 +482,81 @@ export default function IntradayPage() {
         <MetricTile label="Manual Scans" value={intradayScanCount} detail="from backend scan queue" icon={ScanLine} tone={intradayScanCount ? 'good' : 'warn'} />
       </div>
 
-      <TerminalPanel eyebrow="Custom Intraday Scan" title="Selected Stocks Scanner">
-        <div className="scan-entry-grid">
-          <label className="field field--wide">
-            <span>Stocks To Scan</span>
-            <textarea value={customSymbols} onChange={(event) => setCustomSymbols(event.target.value)} placeholder="Enter live symbols separated by commas" rows={3} />
-          </label>
-          <label className="field">
-            <span>Period</span>
-            <select value={period} onChange={(event) => setPeriod(event.target.value)}><option>5d</option><option>30d</option><option>60d</option><option>3mo</option><option>6mo</option><option>1y</option></select>
-          </label>
-          <label className="field">
-            <span>Interval</span>
-            <select value={interval} onChange={(event) => setIntervalValue(event.target.value)}><option>5m</option><option>15m</option><option>1h</option><option>1d</option></select>
-          </label>
-          <label className="field">
-            <span>Stop Loss Method</span>
-            <select value={filters.stopMethod} onChange={(event) => setFilters((current) => ({ ...current, stopMethod: event.target.value }))}><option>Recent swing low/high</option><option>1.2x ATR</option><option>VWAP rejection</option><option>Previous candle low/high</option></select>
-          </label>
-          <label className="field">
-            <span>Target Plan</span>
-            <select value={filters.targetPlan} onChange={(event) => setFilters((current) => ({ ...current, targetPlan: event.target.value }))}><option>T1 1R / T2 2R</option><option>T1 pivot / T2 day high-low</option><option>T1 0.8R / T2 1.5R</option></select>
-          </label>
-          <div className="field field--actions">
-            <span>Action</span>
-            <button className="btn-secondary" type="button" onClick={pullGrowwSymbolsToCustomScan}><Download size={15} /> Pull Groww List</button>
-            <button className="btn-primary" onClick={handleRunCustomScan}><Play size={15} /> {loading ? 'Start Another' : 'Run Intraday Scan'}</button>
+      <TerminalPanel 
+        eyebrow="Custom Intraday Scan" 
+        title="Selected Stocks Scanner"
+        actions={
+          <button 
+            className="btn-secondary" 
+            type="button" 
+            onClick={() => setShowConfig(!showConfig)}
+            style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}
+          >
+            {showConfig ? 'Hide Settings' : 'Configure Parameters'}
+          </button>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '4px 8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Stocks:</span>
+            <input 
+              value={customSymbols} 
+              onChange={(event) => setCustomSymbols(event.target.value)} 
+              placeholder="RELIANCE.NS, TCS.NS"
+              style={{ 
+                padding: '3px 6px', 
+                fontSize: '0.76rem', 
+                width: '300px', 
+                background: 'var(--panel-strong)', 
+                border: '1px solid var(--border)',
+                borderRadius: '4px',
+                color: 'var(--text)'
+              }}
+            />
+            <button className="btn-secondary" type="button" onClick={pullGrowwSymbolsToCustomScan} style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}><Download size={11} /> Pull Groww List</button>
+            <button className="btn-primary" onClick={handleRunCustomScan} style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}><Play size={11} /> {loading ? 'Running...' : 'Run Intraday Scan'}</button>
           </div>
+
+          {showConfig && (
+            <div style={{ 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', 
+              gap: '8px',
+              background: 'var(--surface-3)',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              padding: '10px',
+              marginTop: '4px'
+            }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '1px', fontSize: '0.65rem' }}>
+                <span style={{ color: 'var(--muted)', fontWeight: 700 }}>Period</span>
+                <select value={period} onChange={(event) => setPeriod(event.target.value)} style={{ padding: '2px 4px', fontSize: '0.74rem', background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}>
+                  <option>5d</option><option>30d</option><option>60d</option><option>3mo</option><option>6mo</option><option>1y</option>
+                </select>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '1px', fontSize: '0.65rem' }}>
+                <span style={{ color: 'var(--muted)', fontWeight: 700 }}>Interval</span>
+                <select value={interval} onChange={(event) => setIntervalValue(event.target.value)} style={{ padding: '2px 4px', fontSize: '0.74rem', background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}>
+                  <option>5m</option><option>15m</option><option>1h</option><option>1d</option>
+                </select>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '1px', fontSize: '0.65rem' }}>
+                <span style={{ color: 'var(--muted)', fontWeight: 700 }}>Stop Loss Method</span>
+                <select value={filters.stopMethod} onChange={(event) => setFilters((current) => ({ ...current, stopMethod: event.target.value }))} style={{ padding: '2px 4px', fontSize: '0.74rem', background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}>
+                  <option>Recent swing low/high</option><option>1.2x ATR</option><option>VWAP rejection</option><option>Previous candle low/high</option>
+                </select>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '1px', fontSize: '0.65rem' }}>
+                <span style={{ color: 'var(--muted)', fontWeight: 700 }}>Target Plan</span>
+                <select value={filters.targetPlan} onChange={(event) => setFilters((current) => ({ ...current, targetPlan: event.target.value }))} style={{ padding: '2px 4px', fontSize: '0.74rem', background: 'var(--panel-strong)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}>
+                  <option>T1 1R / T2 2R</option><option>T1 pivot / T2 day high-low</option><option>T1 0.8R / T2 1.5R</option>
+                </select>
+              </label>
+            </div>
+          )}
         </div>
-        {quickSignalLoading && <p className="small status-good">Analyzing single stock immediately...</p>}
-        {quickSignalError && <p className="small status-bad">{quickSignalError}</p>}
+        {quickSignalLoading && <p className="small status-good" style={{ margin: '4px 8px', fontSize: '0.72rem' }}>Analyzing single stock immediately...</p>}
+        {quickSignalError && <p className="small status-bad" style={{ margin: '4px 8px', fontSize: '0.72rem' }}>{quickSignalError}</p>}
       </TerminalPanel>
 
       <TerminalPanel eyebrow="Selected Stocks Scanner" title="Custom Intraday Results">
@@ -572,28 +619,50 @@ export default function IntradayPage() {
           </p>
           <StockGrid items={growwRows} loading={false} onPinStock={addToMonitor} pinLabel="Pin to intraday monitor" />
         </TerminalPanel>
-        <TerminalPanel eyebrow="Section A" title="Latest Intraday Custom Filtered Stocks">
+        <TerminalPanel 
+          eyebrow="Dual-Panel Scanner" 
+          title="Latest Intraday Custom Filtered Stocks"
+          actions={
+            <button 
+              className="btn-secondary" 
+              type="button" 
+              onClick={() => setShowFilters(!showFilters)}
+              style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}
+            >
+              <Settings2 size={13} /> {showFilters ? 'Hide Filters' : 'Configure Filters'}
+            </button>
+          }
+        >
           <Toolbar search={query} setSearch={setQuery} />
+          {showFilters && (
+            <div style={{
+              background: 'var(--surface-3)',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              padding: '10px',
+              marginTop: '4px',
+              marginBottom: '8px'
+            }}>
+              <div className="form-grid" style={{ margin: 0 }}>
+                <label className="field"><span>Sector</span><input value={filters.sector} onChange={(event) => setFilters((current) => ({ ...current, sector: event.target.value }))} /></label>
+                <label className="field"><span>Industry</span><input value={filters.industry} onChange={(event) => setFilters((current) => ({ ...current, industry: event.target.value }))} /></label>
+                <label className="field"><span>Volume</span><select value={filters.volume} onChange={(event) => setFilters((current) => ({ ...current, volume: event.target.value }))}><option>{'>= 1.5x avg'}</option><option>{'>= 2x avg'}</option><option>{'>= 3x avg'}</option></select></label>
+                <label className="field"><span>Price Range</span><input value={filters.priceRange} onChange={(event) => setFilters((current) => ({ ...current, priceRange: event.target.value }))} /></label>
+                <label className="field"><span>ML Score</span><select value={filters.mlScore} onChange={(event) => setFilters((current) => ({ ...current, mlScore: event.target.value }))}><option>{'>= 55'}</option><option>{'>= 60'}</option><option>{'>= 70'}</option></select></label>
+                <label className="field"><span>Technical Score</span><select value={filters.technicalScore} onChange={(event) => setFilters((current) => ({ ...current, technicalScore: event.target.value }))}><option>{'>= 50'}</option><option>{'>= 55'}</option><option>{'>= 65'}</option></select></label>
+                <label className="field"><span>Risk Score</span><select value={filters.riskScore} onChange={(event) => setFilters((current) => ({ ...current, riskScore: event.target.value }))}><option>{'<= 35'}</option><option>{'<= 50'}</option><option>{'<= 65'}</option></select></label>
+                <label className="field"><span>Reward Potential</span><select value={filters.rewardPotential} onChange={(event) => setFilters((current) => ({ ...current, rewardPotential: event.target.value }))}><option>{'>= 1.5R'}</option><option>{'>= 2R'}</option><option>{'>= 3R'}</option></select></label>
+                <label className="field"><span>VWAP Filter</span><select value={filters.vwap} onChange={(event) => setFilters((current) => ({ ...current, vwap: event.target.value }))}><option>Required</option><option>Preferred</option><option>Ignore</option></select></label>
+                <label className="field"><span>Breakout Filter</span><select value={filters.breakout} onChange={(event) => setFilters((current) => ({ ...current, breakout: event.target.value }))}><option>Required</option><option>Preferred</option><option>Pullback allowed</option></select></label>
+              </div>
+              <div className="terminal-actions" style={{ marginTop: '8px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '6px' }}>
+                <select value={displayLimit} onChange={(event) => setDisplayLimit(Number(event.target.value))}><option value={10}>Top 10</option><option value={25}>Top 25</option></select>
+                <button className="btn-primary" type="button"><Star size={13} /> Apply Filters</button>
+                <button className="btn-secondary" type="button">Reset</button>
+              </div>
+            </div>
+          )}
           <StockGrid items={displayItems} loading={loading && !displayItems.length} pageSize={displayLimit} onPinStock={addToMonitor} pinLabel="Pin to intraday monitor" />
-        </TerminalPanel>
-        <TerminalPanel eyebrow="Section B" title="Manual Custom Scan">
-          <div className="form-grid">
-            <label className="field"><span>Sector</span><input value={filters.sector} onChange={(event) => setFilters((current) => ({ ...current, sector: event.target.value }))} /></label>
-            <label className="field"><span>Industry</span><input value={filters.industry} onChange={(event) => setFilters((current) => ({ ...current, industry: event.target.value }))} /></label>
-            <label className="field"><span>Volume</span><select value={filters.volume} onChange={(event) => setFilters((current) => ({ ...current, volume: event.target.value }))}><option>{'>= 1.5x avg'}</option><option>{'>= 2x avg'}</option><option>{'>= 3x avg'}</option></select></label>
-            <label className="field"><span>Price Range</span><input value={filters.priceRange} onChange={(event) => setFilters((current) => ({ ...current, priceRange: event.target.value }))} /></label>
-            <label className="field"><span>ML Score</span><select value={filters.mlScore} onChange={(event) => setFilters((current) => ({ ...current, mlScore: event.target.value }))}><option>{'>= 55'}</option><option>{'>= 60'}</option><option>{'>= 70'}</option></select></label>
-            <label className="field"><span>Technical Score</span><select value={filters.technicalScore} onChange={(event) => setFilters((current) => ({ ...current, technicalScore: event.target.value }))}><option>{'>= 50'}</option><option>{'>= 55'}</option><option>{'>= 65'}</option></select></label>
-            <label className="field"><span>Risk Score</span><select value={filters.riskScore} onChange={(event) => setFilters((current) => ({ ...current, riskScore: event.target.value }))}><option>{'<= 35'}</option><option>{'<= 50'}</option><option>{'<= 65'}</option></select></label>
-            <label className="field"><span>Reward Potential</span><select value={filters.rewardPotential} onChange={(event) => setFilters((current) => ({ ...current, rewardPotential: event.target.value }))}><option>{'>= 1.5R'}</option><option>{'>= 2R'}</option><option>{'>= 3R'}</option></select></label>
-            <label className="field"><span>VWAP Filter</span><select value={filters.vwap} onChange={(event) => setFilters((current) => ({ ...current, vwap: event.target.value }))}><option>Required</option><option>Preferred</option><option>Ignore</option></select></label>
-            <label className="field"><span>Breakout Filter</span><select value={filters.breakout} onChange={(event) => setFilters((current) => ({ ...current, breakout: event.target.value }))}><option>Required</option><option>Preferred</option><option>Pullback allowed</option></select></label>
-          </div>
-          <div className="terminal-actions">
-            <select value={displayLimit} onChange={(event) => setDisplayLimit(Number(event.target.value))}><option value={10}>Top 10</option><option value={25}>Top 25</option></select>
-            <button className="btn-primary"><Star size={15} /> Apply Filters</button>
-            <button className="btn-secondary">Reset</button>
-          </div>
         </TerminalPanel>
       </div>
     </main>

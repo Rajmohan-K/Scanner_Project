@@ -921,8 +921,8 @@ tr:last-child td { border-bottom: 0; }
 }
 
 .row-actions .icon-button {
-  width: 29px;
-  min-height: 29px;
+  width: 22px;
+  min-height: 22px;
 }
 
 .architecture-card {
@@ -5057,15 +5057,15 @@ select option:checked {
 .terminal-table-row {
   display: grid;
   min-width: 1320px;
-  gap: 10px;
+  gap: 6px;
   align-items: center;
-  padding: 12px 14px;
+  padding: 3px 8px;
 }
 
 .terminal-table-head {
   background: rgba(148, 163, 184, 0.08);
   color: var(--muted);
-  font-size: 0.76rem;
+  font-size: 0.7rem;
   font-weight: 900;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -5074,23 +5074,25 @@ select option:checked {
 .terminal-table-row {
   border-top: 1px solid var(--border);
   color: var(--text);
+  font-size: 0.8rem;
 }
 
 .terminal-table-row strong {
   display: grid;
-  gap: 3px;
+  gap: 2px;
+  font-size: 0.82rem;
 }
 
 .terminal-table-row small {
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.68rem;
   font-weight: 600;
 }
 
 .watchlist-monitor-table .terminal-table-head,
 .watchlist-monitor-row {
-  min-width: 2380px;
-  grid-template-columns: 150px 170px 105px 86px 90px 96px 88px 140px 170px 110px 105px 105px 105px 105px 105px 140px 170px 220px 120px 130px 100px 96px;
+  min-width: 2055px;
+  grid-template-columns: 110px 120px 80px 70px 70px 80px 70px 100px 135px 85px 120px 80px 80px 80px 80px 80px 110px 110px 130px 90px 100px 80px 75px;
 }
 
 .alert-history-table .terminal-table-head,
@@ -5154,11 +5156,11 @@ select option:checked {
   width: fit-content;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
-  padding: 5px 10px;
+  border-radius: 4px;
+  padding: 2px 6px;
   border: 1px solid var(--border);
-  font-size: 0.78rem;
-  font-weight: 900;
+  font-size: 0.68rem;
+  font-weight: 800;
 }
 
 .pill-good {
@@ -5201,4 +5203,116 @@ select option:checked {
   .watchlist-add-row {
     grid-template-columns: 1fr;
   }
+}
+
+/* PageHero Compression - Global compact dashboard bar look */
+.terminal-hero {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  padding: 6px 16px !important;
+  background: var(--panel) !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--border) !important;
+  border-radius: 0 !important;
+  gap: 10px !important;
+  min-height: auto !important;
+  margin-bottom: 10px !important;
+  box-shadow: none !important;
+}
+
+.terminal-hero__copy {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+
+.terminal-hero .terminal-eyebrow {
+  display: none !important;
+}
+
+.terminal-hero h1 {
+  margin: 0 !important;
+  font-size: 0.95rem !important;
+  font-weight: 800 !important;
+  color: var(--text) !important;
+  line-height: 1.2 !important;
+  max-width: none !important;
+}
+
+.terminal-hero p, 
+.terminal-hero__copy p {
+  display: none !important;
+}
+
+.terminal-hero__right {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  margin: 0 !important;
+  min-width: auto !important;
+  flex-direction: row-reverse !important;
+}
+
+.terminal-actions {
+  display: flex !important;
+  gap: 6px !important;
+  align-items: center !important;
+  margin: 0 !important;
+}
+
+/* Shrink buttons inside PageHero */
+.terminal-hero .btn-primary,
+.terminal-hero .btn-secondary {
+  padding: 3px 8px !important;
+  font-size: 0.72rem !important;
+  min-height: 26px !important;
+}
+
+.terminal-hero .btn-primary svg,
+.terminal-hero .btn-secondary svg {
+  width: 11px !important;
+  height: 11px !important;
+}
+
+/* Make metrics layout inline and ultra-compact */
+.hero-metrics {
+  display: flex !important;
+  gap: 8px !important;
+  width: auto !important;
+  margin: 0 !important;
+}
+
+.mini-metric {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 4px !important;
+  font-size: 0.7rem !important;
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+  min-height: auto !important;
+  color: var(--muted) !important;
+}
+
+.mini-metric span {
+  font-size: 0.7rem !important;
+  color: var(--muted) !important;
+  text-transform: capitalize !important;
+  margin: 0 !important;
+}
+
+.mini-metric strong {
+  font-size: 0.7rem !important;
+  color: var(--text) !important;
+  margin: 0 !important;
+}
+
+/* Prefix with divider symbol for clean look */
+.mini-metric:not(:first-child)::before {
+  content: "|" !important;
+  color: var(--border) !important;
+  margin-right: 4px !important;
 }

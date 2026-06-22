@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { Pause, Play, RotateCcw, SlidersHorizontal, Square, Zap } from 'lucide-react';
+import { Pause, Play, RotateCcw, Settings2, SlidersHorizontal, Square, Zap } from 'lucide-react';
 import { getActiveScans, getScanStatus, getScanSummaries, pauseScan, resumeScan, startScan, stopAllScans, stopScan } from '@/lib/api';
 import { useRealtime } from '@/hooks/useRealtime';
 import { setScans, updateProgress } from '@/state/scanSlice';
@@ -116,6 +116,7 @@ export default function ScanCenterPage() {
   const [v4Filters, setV4Filters] = useState(defaultV4Filters);
   const [customSymbolText, setCustomSymbolText] = useState('');
   const [watchlistSymbolText, setWatchlistSymbolText] = useState('');
+  const [showV4Filters, setShowV4Filters] = useState(false);
   const scanListInFlightRef = React.useRef(false);
   const scanListFailuresRef = React.useRef(0);
   const activeStatusFailuresRef = React.useRef(0);
@@ -382,13 +383,47 @@ export default function ScanCenterPage() {
         eyebrow="Scan Center"
         title="Scanner V4"
         description="High-profit stock discovery with strict shortlist controls, validation pools, data-quality gates, and live backend task control."
-        actions={<button className="btn-primary" onClick={handleStart}><Play size={16} /> Start Scan</button>}
+        actions={<>
+          <button className="btn-secondary" type="button" onClick={() => setShowV4Filters(!showV4Filters)}><Settings2 size={16} /> {showV4Filters ? 'Hide V4 Filters' : 'Configure V4 Filters'}</button>
+          <button className="btn-primary" onClick={handleStart}><Play size={16} /> Start Scan</button>
+        </>}
         metrics={[
           { label: 'Queue', value: String(scans.length) },
           { label: 'Active Scans', value: String(activeScans.length), tone: activeScans.length ? 'good' : 'warn' },
           { label: 'Min Profit', value: `${v4Filters.minExpectedReturnPct}%`, tone: 'good' },
         ]}
       />
+
+      {showV4Filters && (
+        <div style={{
+          background: 'var(--surface-3)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          padding: '12px',
+          margin: '0 16px 14px 16px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px'
+        }}>
+          <div className="form-grid" style={{ margin: 0 }}>
+            <label className="field"><span>Minimum Profit %</span><input type="number" min={0} max={50} step={0.5} value={v4Filters.minExpectedReturnPct} onChange={(event) => handleV4FilterChange('minExpectedReturnPct', Number(event.target.value))} /></label>
+            <label className="field"><span>Minimum ML %</span><input type="number" min={0} max={100} step={1} value={v4Filters.minMlProbability} onChange={(event) => handleV4FilterChange('minMlProbability', Number(event.target.value))} /></label>
+            <label className="field"><span>Minimum R:R</span><input type="number" min={0} max={10} step={0.1} value={v4Filters.minRiskReward} onChange={(event) => handleV4FilterChange('minRiskReward', Number(event.target.value))} /></label>
+            <label className="field"><span>Max Stop %</span><input type="number" min={0} max={30} step={0.5} value={v4Filters.maxStopDistancePct} onChange={(event) => handleV4FilterChange('maxStopDistancePct', Number(event.target.value))} /></label>
+            <label className="field"><span>Data Quality %</span><input type="number" min={0} max={100} step={1} value={v4Filters.minDataReliabilityScore} onChange={(event) => handleV4FilterChange('minDataReliabilityScore', Number(event.target.value))} /></label>
+            <label className="field"><span>Profitability Score</span><input type="number" min={0} max={100} step={1} value={v4Filters.minProfitabilityScore} onChange={(event) => handleV4FilterChange('minProfitabilityScore', Number(event.target.value))} /></label>
+            <label className="field"><span>Candidate Pool</span><input type="number" min={25} max={500} step={5} value={v4Filters.candidatePool} onChange={(event) => handleV4FilterChange('candidatePool', Number(event.target.value))} /></label>
+            <label className="field"><span>Validation Pool</span><input type="number" min={5} max={100} step={5} value={v4Filters.validationPool} onChange={(event) => handleV4FilterChange('validationPool', Number(event.target.value))} /></label>
+            <label className="field"><span>Final Rows</span><input type="number" min={5} max={50} step={1} value={v4Filters.topN} onChange={(event) => handleV4FilterChange('topN', Number(event.target.value))} /></label>
+            <label className="field"><span>Workers</span><input type="number" min={1} max={12} step={1} value={v4Filters.workers} onChange={(event) => handleV4FilterChange('workers', Number(event.target.value))} /></label>
+            <label className="field field--inline"><span>Telegram</span><input type="checkbox" checked={v4Filters.notifyTelegram} onChange={(event) => handleV4FilterChange('notifyTelegram', event.target.checked)} /></label>
+          </div>
+          <div className="terminal-actions" style={{ marginTop: '8px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '6px' }}>
+            <button className="btn-primary" onClick={handleStart}><SlidersHorizontal size={13} /> Run V4 Filter</button>
+            <button className="btn-secondary" onClick={resetV4Filters}><RotateCcw size={13} /> Reset V4</button>
+          </div>
+        </div>
+      )}
 
       <div className="terminal-grid terminal-grid--split">
         <TerminalPanel eyebrow="Scan Types" title="Priority Launcher">
@@ -433,26 +468,6 @@ export default function ScanCenterPage() {
             <button className="btn-secondary" onClick={handleResume} disabled={!activeScanId || activeStatus?.status !== 'paused'}><RotateCcw size={15} /> Resume</button>
             <button className="btn-secondary" onClick={handleStop} disabled={!activeScanId}><Square size={15} /> Stop Selected</button>
             <button className="btn-secondary" onClick={handleStopAll} disabled={!activeScans.length}><Square size={15} /> Stop All Active</button>
-          </div>
-        </TerminalPanel>
-
-        <TerminalPanel eyebrow="V4 Filters" title="Profitability Gate">
-          <div className="form-grid">
-            <label className="field"><span>Minimum Profit %</span><input type="number" min={0} max={50} step={0.5} value={v4Filters.minExpectedReturnPct} onChange={(event) => handleV4FilterChange('minExpectedReturnPct', Number(event.target.value))} /></label>
-            <label className="field"><span>Minimum ML %</span><input type="number" min={0} max={100} step={1} value={v4Filters.minMlProbability} onChange={(event) => handleV4FilterChange('minMlProbability', Number(event.target.value))} /></label>
-            <label className="field"><span>Minimum R:R</span><input type="number" min={0} max={10} step={0.1} value={v4Filters.minRiskReward} onChange={(event) => handleV4FilterChange('minRiskReward', Number(event.target.value))} /></label>
-            <label className="field"><span>Max Stop %</span><input type="number" min={0} max={30} step={0.5} value={v4Filters.maxStopDistancePct} onChange={(event) => handleV4FilterChange('maxStopDistancePct', Number(event.target.value))} /></label>
-            <label className="field"><span>Data Quality %</span><input type="number" min={0} max={100} step={1} value={v4Filters.minDataReliabilityScore} onChange={(event) => handleV4FilterChange('minDataReliabilityScore', Number(event.target.value))} /></label>
-            <label className="field"><span>Profitability Score</span><input type="number" min={0} max={100} step={1} value={v4Filters.minProfitabilityScore} onChange={(event) => handleV4FilterChange('minProfitabilityScore', Number(event.target.value))} /></label>
-            <label className="field"><span>Candidate Pool</span><input type="number" min={25} max={500} step={5} value={v4Filters.candidatePool} onChange={(event) => handleV4FilterChange('candidatePool', Number(event.target.value))} /></label>
-            <label className="field"><span>Validation Pool</span><input type="number" min={5} max={100} step={5} value={v4Filters.validationPool} onChange={(event) => handleV4FilterChange('validationPool', Number(event.target.value))} /></label>
-            <label className="field"><span>Final Rows</span><input type="number" min={5} max={50} step={1} value={v4Filters.topN} onChange={(event) => handleV4FilterChange('topN', Number(event.target.value))} /></label>
-            <label className="field"><span>Workers</span><input type="number" min={1} max={12} step={1} value={v4Filters.workers} onChange={(event) => handleV4FilterChange('workers', Number(event.target.value))} /></label>
-            <label className="field field--inline"><span>Telegram</span><input type="checkbox" checked={v4Filters.notifyTelegram} onChange={(event) => handleV4FilterChange('notifyTelegram', event.target.checked)} /></label>
-          </div>
-          <div className="terminal-actions">
-            <button className="btn-primary" onClick={handleStart}><SlidersHorizontal size={15} /> Run V4 Filter</button>
-            <button className="btn-secondary" onClick={resetV4Filters}><RotateCcw size={15} /> Reset V4</button>
           </div>
         </TerminalPanel>
 

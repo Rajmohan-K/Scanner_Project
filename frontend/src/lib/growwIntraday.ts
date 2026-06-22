@@ -152,6 +152,89 @@ function mergeRows(previousRows: any[], nextRows: any[]) {
     .slice(0, 120);
 }
 
+export const GROWW_PRIORITY_ACTIVE_KEY = 'groww-priority-active-v1';
+export const GROWW_PRIORITY_HISTORY_KEY = 'groww-priority-history-v1';
+export const GROWW_PRIORITY_UPDATED_EVENT = 'groww-priority-updated';
+
+export type TrackedGrowwPriorityRow = any & {
+  key: string;
+  status: 'active';
+  found_at: string;
+  suggested_entry_time: string;
+  last_price?: number;
+  last_checked?: string;
+  lifecycle_reason?: string;
+};
+
+export function readGrowwPriorityActive(): TrackedGrowwPriorityRow[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem(GROWW_PRIORITY_ACTIVE_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+export function writeGrowwPriorityActive(rows: TrackedGrowwPriorityRow[]) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(GROWW_PRIORITY_ACTIVE_KEY, JSON.stringify(rows));
+  window.dispatchEvent(new Event(GROWW_PRIORITY_UPDATED_EVENT));
+}
+
+export function readGrowwPriorityHistory(): any[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem(GROWW_PRIORITY_HISTORY_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+export function writeGrowwPriorityHistory(rows: any[]) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(GROWW_PRIORITY_HISTORY_KEY, JSON.stringify(rows));
+  window.dispatchEvent(new Event(GROWW_PRIORITY_UPDATED_EVENT));
+}
+
+export function upsertGrowwPriorityRows(newRows: any[]) {
+  const active = readGrowwPriorityActive();
+  const history = readGrowwPriorityHistory();
+  const now = Date.now();
+  const recentClosed = new Map(
+    history
+      .filter((row: any) => now - new Date(row.closed_at).getTime() < 30 * 60 * 1000)
+      .map((row: any) => [row.symbol, row])
+  );
+  const bySymbol = new Map(active.map((row: any) => [row.symbol, row]));
+  let added = 0;
+  newRows.forEach((row) => {
+    const symbol = rowSymbol(row);
+    if (!symbol || recentClosed.has(symbol)) return;
+    const existing = bySymbol.get(symbol);
+    if (existing) {
+      bySymbol.set(symbol, {
+        ...existing,
+        ...row,
+        found_at: existing.found_at,
+        suggested_entry_time: existing.suggested_entry_time || row.suggested_entry_time || new Date().toISOString(),
+        status: 'active',
+      });
+    } else {
+      added += 1;
+      bySymbol.set(symbol, {
+        ...row,
+        symbol,
+        status: 'active',
+        found_at: new Date().toISOString(),
+        suggested_entry_time: row.suggested_entry_time || row.suggested_time || row.generated_at || new Date().toISOString(),
+      });
+    }
+  });
+  const nextActive = Array.from(bySymbol.values());
+  writeGrowwPriorityActive(nextActive);
+  return { active: nextActive, added };
+}
+
 export async function runGrowwIntradayAnalysis(limit = 80) {
   const output = await analyzeGrowwIntradayStocks(limit, '5m', 90);
   const symbols: string[] = Array.from(new Set<string>((output.symbols || []).map((symbol: string) => String(symbol).toUpperCase()).filter(Boolean)));
@@ -163,6 +246,9 @@ export async function runGrowwIntradayAnalysis(limit = 80) {
   const previous = readGrowwResults();
   const mergedRows = mergeRows(previous.rows || [], rows);
   const priorityRows = buildGrowwPriorityRows(mergedRows);
+
+  // Upsert priority candidates into continuous background monitoring list
+  upsertGrowwPriorityRows(priorityRows);
 
   const saved: GrowwSavedResults = {
     rows: mergedRows,

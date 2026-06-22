@@ -160,7 +160,20 @@ def get_live_quote(symbol, use_cache=True):
             return cached_quote.copy()
 
         ticker = yf.Ticker(symbol)
-        fast_info = getattr(ticker, "fast_info", {}) or {}
+        try:
+            fast_info = ticker.fast_info
+            if fast_info is None or not hasattr(fast_info, "get"):
+                fast_info = {}
+        except Exception as exc:
+            logger.warning(f"Failed to get fast_info for {symbol}: {exc}")
+            fast_info = {}
+
+        # Fallback values from fast_info if available
+        current_price = fast_info.get("lastPrice") if hasattr(fast_info, "get") else None
+        open_price = fast_info.get("open") if hasattr(fast_info, "get") else None
+        prev_close = fast_info.get("previousClose") if hasattr(fast_info, "get") else None
+        day_high = fast_info.get("dayHigh") if hasattr(fast_info, "get") else None
+        day_low = fast_info.get("dayLow") if hasattr(fast_info, "get") else None
 
         info = {}
         if use_cache:
@@ -169,41 +182,50 @@ def get_live_quote(symbol, use_cache=True):
             except Exception:
                 info = {}
 
-        last_close = None
-        prev_close = None
-        open_price = None
-        if use_cache:
-            history = ticker.history(period="5d", interval="1d")
-            if history is not None and not history.empty:
-                last_close = float(history["Close"].iloc[-1])
-                open_price = float(history["Open"].iloc[-1])
-                if len(history) >= 2:
-                    prev_close = float(history["Close"].iloc[-2])
+        # If fast_info failed or doesn't have core prices, fetch a small history as robust fallback
+        if not current_price or not open_price or not prev_close:
+            try:
+                history = ticker.history(period="5d", interval="1d")
+                if history is not None and not history.empty:
+                    if not current_price:
+                        current_price = float(history["Close"].iloc[-1])
+                    if not open_price:
+                        open_price = float(history["Open"].iloc[-1])
+                    if not prev_close:
+                        prev_close = float(history["Close"].iloc[-2]) if len(history) >= 2 else current_price
+                    if not day_high:
+                        day_high = float(history["High"].iloc[-1])
+                    if not day_low:
+                        day_low = float(history["Low"].iloc[-1])
+            except Exception as history_exc:
+                logger.warning(f"Failed to fetch history fallback in get_live_quote for {symbol}: {history_exc}")
+
+        # Fallback to info dict if still missing
+        if not current_price:
+            try:
+                if not info:
+                    info = ticker.info or {}
+                current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+                if not open_price:
+                    open_price = info.get("open") or info.get("regularMarketOpen")
+                if not prev_close:
+                    prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+                if not day_high:
+                    day_high = info.get("dayHigh") or info.get("regularMarketDayHigh")
+                if not day_low:
+                    day_low = info.get("dayLow") or info.get("regularMarketDayLow")
+            except Exception as info_exc:
+                logger.warning(f"Failed to fetch info fallback in get_live_quote for {symbol}: {info_exc}")
 
         quote = {
-            "current_price": (
-                fast_info.get("lastPrice")
-                or info.get("currentPrice")
-                or info.get("regularMarketPrice")
-                or last_close
-            ),
-            "open": (
-                fast_info.get("open")
-                or info.get("open")
-                or info.get("regularMarketOpen")
-                or open_price
-            ),
-            "previous_close": (
-                fast_info.get("previousClose")
-                or info.get("previousClose")
-                or info.get("regularMarketPreviousClose")
-                or prev_close
-            ),
-            "day_high": fast_info.get("dayHigh") or info.get("dayHigh"),
-            "day_low": fast_info.get("dayLow") or info.get("dayLow"),
+            "current_price": current_price,
+            "open": open_price,
+            "previous_close": prev_close,
+            "day_high": day_high or (info.get("dayHigh") if info else None),
+            "day_low": day_low or (info.get("dayLow") if info else None),
             "source": "yfinance",
         }
-        if use_cache:
+        if use_cache and current_price is not None:
             save_cache("quotes", cache_key, quote)
         return quote
 

@@ -2205,11 +2205,33 @@ async def watchlist_items(request: web.Request) -> web.Response:
             dumps=lambda value: json.dumps(value, default=str),
         )
     payload = await request.json()
-    try:
-        item = await watchlist_monitor.add_item(payload)
-    except ValueError as exc:
-        return web.json_response({"status": "error", "message": str(exc)}, status=400)
-    return web.json_response({"status": "ok", "item": item}, dumps=lambda value: json.dumps(value, default=str))
+    raw_symbol = payload.get("symbol") or payload.get("name") or ""
+    if "," in raw_symbol:
+        symbols = [s.strip() for s in raw_symbol.split(",") if s.strip()]
+        if not symbols:
+            return web.json_response({"status": "error", "message": "symbol is required"}, status=400)
+        items = []
+        errors = []
+        for sym in symbols:
+            try:
+                single_payload = {**payload, "symbol": sym}
+                item = await watchlist_monitor.add_item(single_payload)
+                items.append(item)
+            except Exception as exc:
+                logger.warning(f"Failed to add symbol {sym} during batch add: {exc}")
+                errors.append(f"{sym}: {exc}")
+        if not items:
+            return web.json_response({"status": "error", "message": f"No valid symbols added. Errors: {'; '.join(errors)}"}, status=400)
+        return web.json_response(
+            {"status": "ok", "item": items[-1], "items": items},
+            dumps=lambda value: json.dumps(value, default=str),
+        )
+    else:
+        try:
+            item = await watchlist_monitor.add_item(payload)
+        except ValueError as exc:
+            return web.json_response({"status": "error", "message": str(exc)}, status=400)
+        return web.json_response({"status": "ok", "item": item}, dumps=lambda value: json.dumps(value, default=str))
 
 
 async def watchlist_item_update(request: web.Request) -> web.Response:
@@ -2246,11 +2268,14 @@ async def watchlist_stream(request: web.Request) -> web.StreamResponse:
     last_signature = ""
     try:
         for _ in range(1800):
+            for alert in watchlist_monitor.drain_pending_alerts():
+                await response.write(await encode_sse("WATCHLIST_ALERT", {"status": "ok", "alert": alert}))
             payload = {
                 "status": "ok",
                 "items": watchlist_monitor.list_items(),
                 "monitor": watchlist_monitor.status,
                 "alerts": watchlist_monitor.alert_history(limit=20),
+                "audit": list(reversed(watchlist_monitor.audit_history))[:100],
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
             signature = json.dumps(payload, sort_keys=True, default=str)
@@ -2287,6 +2312,28 @@ async def alert_history_api(request: web.Request) -> web.Response:
 
 async def watchlist_history_api(request: web.Request) -> web.Response:
     return await alert_history_api(request)
+
+
+async def clear_watchlist_history(_: web.Request) -> web.Response:
+    watchlist_monitor.clear_alerts()
+    return web.json_response({"status": "ok", "message": "Alert history cleared"})
+
+
+async def get_watchlist_audit(request: web.Request) -> web.Response:
+    try:
+        limit = int(request.query.get("limit") or 100)
+    except ValueError:
+        limit = 100
+    return web.json_response(
+        {"status": "ok", "audit": list(reversed(watchlist_monitor.audit_history))[:limit]},
+        dumps=lambda value: json.dumps(value, default=str),
+    )
+
+
+async def clear_watchlist_audit(_: web.Request) -> web.Response:
+    watchlist_monitor.audit_history.clear()
+    watchlist_monitor.persist_audit_history()
+    return web.json_response({"status": "ok", "message": "Watchlist audit history cleared"})
 
 
 async def alert_settings_api(request: web.Request) -> web.Response:
@@ -2780,6 +2827,9 @@ def create_app() -> web.Application:
     app.router.add_delete("/api/watchlist/{symbol}", watchlist_item_update)
     app.router.add_get("/api/watchlist/status", watchlist_status)
     app.router.add_get("/api/watchlist/history", watchlist_history_api)
+    app.router.add_delete("/api/watchlist/history", clear_watchlist_history)
+    app.router.add_get("/api/watchlist/audit", get_watchlist_audit)
+    app.router.add_delete("/api/watchlist/audit", clear_watchlist_audit)
     app.router.add_get("/api/watchlist/stream", watchlist_stream)
     app.router.add_get("/api/alerts", alert_history_api)
     app.router.add_post("/api/alerts/test", alert_test_api)

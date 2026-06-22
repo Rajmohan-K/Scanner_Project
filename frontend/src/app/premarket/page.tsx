@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { BarChart3, CheckCircle2, Download, Play, RefreshCw, Target, TrendingUp } from 'lucide-react';
+import { BarChart3, CheckCircle2, Download, Play, RefreshCw, Settings2, Target, TrendingUp } from 'lucide-react';
 import { extractStockRows, getActiveScans, getDedicatedScanLatest, getLatestScanWithResults, getScanStatus, getV20Quote, runDedicatedScan, startScan } from '@/lib/api';
 import { setTopStocks } from '@/state/dashboardSlice';
 import { RootState } from '@/state/store';
@@ -16,6 +16,7 @@ export default function PremarketPage() {
   const toast = useToast();
   const topStocks = useSelector((state: RootState) => state.dashboard.topStocks);
   const [universe, setUniverse] = useState('Full NSE Universe');
+  const [showPremarketConfig, setShowPremarketConfig] = useState(false);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [displayLimit, setDisplayLimit] = useState(10);
@@ -291,31 +292,52 @@ export default function PremarketPage() {
       />
 
       <div className="terminal-grid terminal-grid--split">
-        <TerminalPanel eyebrow="Scan Inputs" title="Universe and Analysis Modules">
-          <div className="control-grid">
-            {['Full NSE Universe', 'Custom Stocks', 'Watchlist Stocks', 'Selected Sectors', 'Selected Industries'].map((item) => (
-              <button key={item} className={universe === item ? 'choice-card active' : 'choice-card'} onClick={() => setUniverse(item)}>{item}</button>
-            ))}
-          </div>
-          <div className="form-grid">
-            <label className="field"><span>Minimum Gap</span><select value={filters.minGap} onChange={(event) => setFilters((current) => ({ ...current, minGap: event.target.value }))}><option>{'>= 0.5%'}</option><option>{'>= 1%'}</option><option>{'>= 2%'}</option></select></label>
-            <label className="field"><span>Volume Filter</span><select value={filters.minVolume} onChange={(event) => setFilters((current) => ({ ...current, minVolume: event.target.value }))}><option>{'>= 1.5x avg'}</option><option>{'>= 2x avg'}</option><option>{'>= 3x avg'}</option></select></label>
-            <label className="field"><span>News Filter</span><select value={filters.news} onChange={(event) => setFilters((current) => ({ ...current, news: event.target.value }))}><option>Required</option><option>Preferred</option><option>Ignore</option></select></label>
-            <label className="field"><span>Minimum ML</span><select value={filters.minMl} onChange={(event) => setFilters((current) => ({ ...current, minMl: event.target.value }))}><option>{'>= 50'}</option><option>{'>= 55'}</option><option>{'>= 65'}</option></select></label>
-            <label className="field"><span>Max Risk</span><select value={filters.maxRisk} onChange={(event) => setFilters((current) => ({ ...current, maxRisk: event.target.value }))}><option>{'<= 45'}</option><option>{'<= 55'}</option><option>{'<= 65'}</option></select></label>
-            <label className="field"><span>Stop / Target Plan</span><select value={`${filters.stopMethod} | ${filters.targetPlan}`} onChange={(event) => {
-              const [stopMethod, targetPlan] = event.target.value.split(' | ');
-              setFilters((current) => ({ ...current, stopMethod, targetPlan }));
-            }}><option>Opening range / swing low-high | T1 1R / T2 2R</option><option>VWAP invalidation | T1 VWAP extension / T2 2R</option><option>ATR 1.2x | T1 0.8R / T2 1.5R</option></select></label>
-          </div>
-          <div className="module-grid">
-            {analysisModules.map((module) => (
-              <label key={module} className="check-tile">
-                <input type="checkbox" defaultChecked />
-                <span>{module}</span>
-              </label>
-            ))}
-          </div>
+        <TerminalPanel 
+          eyebrow="Scan Inputs" 
+          title="Universe and Analysis Modules"
+          actions={
+            <button 
+              className="btn-secondary" 
+              type="button" 
+              onClick={() => setShowPremarketConfig(!showPremarketConfig)}
+              style={{ padding: '3px 8px', fontSize: '0.72rem', minHeight: '26px' }}
+            >
+              {showPremarketConfig ? 'Hide Settings' : 'Configure Parameters'}
+            </button>
+          }
+        >
+          {showPremarketConfig ? (
+            <>
+              <div className="control-grid" style={{ marginBottom: '8px' }}>
+                {['Full NSE Universe', 'Custom Stocks', 'Watchlist Stocks', 'Selected Sectors', 'Selected Industries'].map((item) => (
+                  <button key={item} className={universe === item ? 'choice-card active' : 'choice-card'} onClick={() => setUniverse(item)}>{item}</button>
+                ))}
+              </div>
+              <div className="form-grid" style={{ marginBottom: '8px' }}>
+                <label className="field"><span>Minimum Gap</span><select value={filters.minGap} onChange={(event) => setFilters((current) => ({ ...current, minGap: event.target.value }))}><option>{'>= 0.5%'}</option><option>{'>= 1%'}</option><option>{'>= 2%'}</option></select></label>
+                <label className="field"><span>Volume Filter</span><select value={filters.minVolume} onChange={(event) => setFilters((current) => ({ ...current, minVolume: event.target.value }))}><option>{'>= 1.5x avg'}</option><option>{'>= 2x avg'}</option><option>{'>= 3x avg'}</option></select></label>
+                <label className="field"><span>News Filter</span><select value={filters.news} onChange={(event) => setFilters((current) => ({ ...current, news: event.target.value }))}><option>Required</option><option>Preferred</option><option>Ignore</option></select></label>
+                <label className="field"><span>Minimum ML</span><select value={filters.minMl} onChange={(event) => setFilters((current) => ({ ...current, minMl: event.target.value }))}><option>{'>= 50'}</option><option>{'>= 55'}</option><option>{'>= 65'}</option></select></label>
+                <label className="field"><span>Max Risk</span><select value={filters.maxRisk} onChange={(event) => setFilters((current) => ({ ...current, maxRisk: event.target.value }))}><option>{'<= 45'}</option><option>{'<= 55'}</option><option>{'<= 65'}</option></select></label>
+                <label className="field"><span>Stop / Target Plan</span><select value={`${filters.stopMethod} | ${filters.targetPlan}`} onChange={(event) => {
+                  const [stopMethod, targetPlan] = event.target.value.split(' | ');
+                  setFilters((current) => ({ ...current, stopMethod, targetPlan }));
+                }}><option>Opening range / swing low-high | T1 1R / T2 2R</option><option>VWAP invalidation | T1 VWAP extension / T2 2R</option><option>ATR 1.2x | T1 0.8R / T2 1.5R</option></select></label>
+              </div>
+              <div className="module-grid">
+                {analysisModules.map((module) => (
+                  <label key={module} className="check-tile">
+                    <input type="checkbox" defaultChecked />
+                    <span>{module}</span>
+                  </label>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: '0.72rem', color: 'var(--muted)', padding: '4px 8px' }}>
+              Active Universe: <strong style={{ color: 'var(--text)' }}>{universe}</strong> | Gap: {filters.minGap} | Volume: {filters.minVolume} | News: {filters.news} | ML: {filters.minMl} | Risk: {filters.maxRisk}
+            </div>
+          )}
         </TerminalPanel>
 
         <TerminalPanel eyebrow="Validation Engine" title="Expected vs Actual Performance">

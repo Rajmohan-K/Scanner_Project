@@ -435,7 +435,7 @@ export async function getWatchlist() {
 export async function addWatchlistItem(payload: Partial<WatchlistItem> & { symbol: string }) {
   const response = await client.post('/api/watchlist', payload);
   clearApiCache();
-  return response.data as { status: string; item: WatchlistItem };
+  return response.data as { status: string; item: WatchlistItem; items?: WatchlistItem[] };
 }
 
 export async function updateWatchlistItem(symbol: string, payload: Partial<WatchlistItem>) {
@@ -472,6 +472,46 @@ export async function getWatchlistHistory(params: Record<string, string | number
     if (value !== undefined && value !== '') query.set(key, String(value));
   });
   return liveGet<{ status: string; alerts: AlertHistoryRecord[] }>(`/api/watchlist/history${query.toString() ? `?${query}` : ''}`);
+}
+
+export type WatchlistAuditRecord = {
+  audit_id: string;
+  symbol: string;
+  company_name: string;
+  outcome: 'Target Hit' | 'Stoploss Hit';
+  entry_price: number;
+  exit_price: number;
+  stop_loss: number;
+  target1: number;
+  target2: number;
+  target3: number;
+  profit_loss_pct: number;
+  volume_spike?: number;
+  trade_reason?: string;
+  entered_at: string;
+  archived_at: string;
+  hit_details?: string;
+  suggested_time?: string;
+};
+
+export async function clearWatchlistHistory() {
+  const response = await client.delete('/api/watchlist/history');
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
+export async function getWatchlistAudit(params: Record<string, string | number | undefined> = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') query.set(key, String(value));
+  });
+  return liveGet<{ status: string; audit: WatchlistAuditRecord[] }>(`/api/watchlist/audit${query.toString() ? `?${query}` : ''}`);
+}
+
+export async function clearWatchlistAudit() {
+  const response = await client.delete('/api/watchlist/audit');
+  clearApiCache();
+  return response.data as { status: string; message: string };
 }
 
 export async function getAlertSettings() {
