@@ -340,6 +340,9 @@ export type WatchlistSnapshot = {
   trade_reason?: string;
   risk_percent?: number;
   reason?: string;
+  suggested_time?: string;
+  vwap?: number;
+  ema20?: number;
   stale?: boolean;
 };
 

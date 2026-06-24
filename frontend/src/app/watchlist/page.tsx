@@ -970,6 +970,43 @@ export default function WatchlistPage() {
         )}
       </TerminalPanel>
 
+      <TerminalPanel 
+        eyebrow="Watchlist Audit" 
+        title="Watchlist Outcomes & Comparison"
+        actions={
+          <button 
+            className="btn-secondary" 
+            type="button" 
+            onClick={clearAuditHistory} 
+            disabled={!auditHistory.length}
+          >
+            Clear Outcomes
+          </button>
+        }
+      >
+        <DataTable
+          columns={['Symbol', 'Outcome', 'Net Profit %', 'Entry Price', 'Exit Price', 'Target 1', 'Stop Loss', 'Suggested Time', 'Closed At', 'Details']}
+          rows={auditHistory.map((row, index) => [
+            <strong key={`${row.symbol}-${index}`}>{row.symbol}</strong>,
+            <span key={`${row.symbol}-status-${index}`} className={`status-badge ${row.outcome === 'Target Hit' ? 'status-good' : 'status-bad'}`}>
+              {row.outcome === 'Target Hit' ? 'TARGET HIT' : 'STOPLOSS HIT'}
+            </span>,
+            <span key={`${row.symbol}-pnl-${index}`} className={row.profit_loss_pct >= 0 ? 'positive' : 'negative'} style={{ fontWeight: 'bold' }}>
+              {row.profit_loss_pct >= 0 ? `+${row.profit_loss_pct.toFixed(2)}%` : `${row.profit_loss_pct.toFixed(2)}%`}
+            </span>,
+            row.entry_price ? `INR ${row.entry_price.toFixed(2)}` : '-',
+            row.exit_price ? `INR ${row.exit_price.toFixed(2)}` : '-',
+            row.target1 ? `INR ${row.target1.toFixed(2)}` : '-',
+            row.stop_loss ? `INR ${row.stop_loss.toFixed(2)}` : '-',
+            row.suggested_time || '-',
+            row.archived_at ? new Date(row.archived_at).toLocaleString('en-IN') : '-',
+            row.hit_details || row.trade_reason || '-',
+          ])}
+          emptyTitle="No completed watchlist outcomes"
+          emptyBody="When a monitored stock hits its target or stoploss price, it will be automatically moved here for performance auditing."
+        />
+      </TerminalPanel>
+
       <TerminalPanel
         eyebrow="Alert History"
         title="Watchlist Notification Log"
@@ -1017,43 +1054,6 @@ export default function WatchlistPage() {
         ) : (
           <div className="empty-state">No watchlist alerts yet. Alerts will appear after backend rules trigger.</div>
         )}
-      </TerminalPanel>
-
-      <TerminalPanel 
-        eyebrow="Watchlist Audit" 
-        title="Watchlist Outcomes & Comparison"
-        actions={
-          <button 
-            className="btn-secondary" 
-            type="button" 
-            onClick={clearAuditHistory} 
-            disabled={!auditHistory.length}
-          >
-            Clear Outcomes
-          </button>
-        }
-      >
-        <DataTable
-          columns={['Symbol', 'Outcome', 'Net Profit %', 'Entry Price', 'Exit Price', 'Target 1', 'Stop Loss', 'Suggested Time', 'Closed At', 'Details']}
-          rows={auditHistory.map((row, index) => [
-            <strong key={`${row.symbol}-${index}`}>{row.symbol}</strong>,
-            <span key={`${row.symbol}-status-${index}`} className={`status-badge ${row.outcome === 'Target Hit' ? 'status-good' : 'status-bad'}`}>
-              {row.outcome === 'Target Hit' ? 'TARGET HIT' : 'STOPLOSS HIT'}
-            </span>,
-            <span key={`${row.symbol}-pnl-${index}`} className={row.profit_loss_pct >= 0 ? 'positive' : 'negative'} style={{ fontWeight: 'bold' }}>
-              {row.profit_loss_pct >= 0 ? `+${row.profit_loss_pct.toFixed(2)}%` : `${row.profit_loss_pct.toFixed(2)}%`}
-            </span>,
-            row.entry_price ? `INR ${row.entry_price.toFixed(2)}` : '-',
-            row.exit_price ? `INR ${row.exit_price.toFixed(2)}` : '-',
-            row.target1 ? `INR ${row.target1.toFixed(2)}` : '-',
-            row.stop_loss ? `INR ${row.stop_loss.toFixed(2)}` : '-',
-            row.suggested_time || '-',
-            row.archived_at ? new Date(row.archived_at).toLocaleString('en-IN') : '-',
-            row.hit_details || row.trade_reason || '-',
-          ])}
-          emptyTitle="No completed watchlist outcomes"
-          emptyBody="When a monitored stock hits its target or stoploss price, it will be automatically moved here for performance auditing."
-        />
       </TerminalPanel>
     </main>
   );
