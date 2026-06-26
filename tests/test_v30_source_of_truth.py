@@ -5,10 +5,19 @@ from scanners.meta_scanner import build_meta_scan
 
 
 def _use_temp_db(monkeypatch, tmp_path):
+    import ui.pg_store as pg_store
+    pg_store._SHARED_MOCK_DB = None
     monkeypatch.setattr(v20_store, "DB_PATH", tmp_path / "v30.sqlite")
     monkeypatch.setattr(v20_store, "LIVE_PURGE_MARKER", tmp_path / ".v30_purge_done")
     monkeypatch.setattr(v20_store, "_DB_READY", False)
     v30_store.ensure_v30_schema()
+    with v20_store.connect() as conn:
+        try:
+            conn.execute("DELETE FROM scanner_results")
+            conn.execute("DELETE FROM scan_runs")
+            conn.execute("DELETE FROM trade_plans")
+        except Exception:
+            pass
 
 
 def _scan_body(scan_type: str, family: str, symbol: str, decision: str = "BUY") -> dict:

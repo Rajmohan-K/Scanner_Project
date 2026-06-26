@@ -379,9 +379,17 @@ function StockGridComponent({
                 gap: '8px',
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: '6px' }}>
-                  <h3 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <strong style={{ color: 'var(--accent)' }}>{symbol}</strong>
-                    <span style={{ fontSize: '0.78rem', color: 'var(--muted)' }}>{item.sector || dash} {item.industry ? `| ${item.industry}` : ''}</span>
+                  <h3 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <strong style={{ color: 'var(--accent)' }}>{item.company_name || symbol}</strong>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--muted)' }}>{item.sector || dash} {item.industry ? `| ${item.industry}` : ''}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '16px', fontSize: '0.75rem', color: 'var(--muted)', marginTop: '2px' }}>
+                      <span>NSE: <strong style={{ color: 'var(--text)' }}>{item.nse_symbol || dash}</strong></span>
+                      <span>BSE: <strong style={{ color: 'var(--text)' }}>{item.bse_symbol || dash}</strong></span>
+                      <span>Exchange: <strong style={{ color: 'var(--text)' }}>{item.exchange || 'NSE'}</strong></span>
+                      <span>Source: <strong style={{ color: item.active_quote_source === 'BSE' ? 'var(--warning, #eab308)' : 'var(--text)' }}>{item.active_quote_source || 'NSE'}{item.fallback_reason ? ` (${item.fallback_reason})` : ''}</strong></span>
+                    </div>
                   </h3>
                   <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
                     <button className="btn-secondary" type="button" onClick={() => handlePrimaryPin(item)} style={{ padding: '2px 6px', fontSize: '0.72rem', minHeight: '22px' }}>

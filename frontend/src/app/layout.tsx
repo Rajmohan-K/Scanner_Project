@@ -8,10 +8,11 @@ import GrowwAutoScanner from '@/components/organisms/GrowwAutoScanner';
 import WatchlistAlertListener from '@/components/organisms/WatchlistAlertListener';
 import ReduxProvider from '@/components/layout/ReduxProvider';
 import ToastProvider from '@/components/layout/ToastProvider';
+import WebSocketProvider from '@/components/layout/WebSocketProvider';
 
 export const metadata: Metadata = {
-  title: 'Scanner V10',
-  description: 'Premium fintech stock intelligence platform for NSE screening, ranking, analysis, and reporting.',
+  title: 'Scanner V50',
+  description: 'Premium fintech stock intelligence platform for NSE screening, ranking, analysis, and reporting. Powered by Kotak Neo live data.',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -20,17 +21,19 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         <PageShell>
           <ReduxProvider>
-            <ToastProvider>
-              <GrowwAutoScanner />
-              <WatchlistAlertListener />
-              <div className="app-frame">
-                <GlobalHeader />
-                <div className="workspace-frame">
-                  <TopMarketBar />
-                  <div className="page-shell__content">{children}</div>
+            <WebSocketProvider>
+              <ToastProvider>
+                <GrowwAutoScanner />
+                <WatchlistAlertListener />
+                <div className="app-frame">
+                  <GlobalHeader />
+                  <div className="workspace-frame">
+                    <TopMarketBar />
+                    <div className="page-shell__content">{children}</div>
+                  </div>
                 </div>
-              </div>
-            </ToastProvider>
+              </ToastProvider>
+            </WebSocketProvider>
           </ReduxProvider>
         </PageShell>
       </body>

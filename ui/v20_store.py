@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from data.market_data_provider import get_market_data_provider
 from ui.storage import list_scans, load_scan
+from utils.logger import logger
+import ui.pg_store as pg_store
+from ui.redis_cache import get_redis_client, LiveSnapshotCache
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "ui" / "data" / "v20.sqlite"
-MIGRATION_PATH = PROJECT_ROOT / "migrations" / "001_v20_schema.sql"
 MIGRATIONS_DIR = PROJECT_ROOT / "migrations"
 LIVE_PURGE_MARKER = PROJECT_ROOT / ".scanner_cache" / ".v20_live_purge_v3_done"
 LIVE_REFRESH_SECONDS = 60
@@ -21,6 +23,7 @@ REALTIME_STALE_SECONDS = 90
 _LAST_LIVE_REFRESH: datetime | None = None
 _LAST_REALTIME_REFRESH: datetime | None = None
 _LAST_HOT_CACHE_REFRESH: datetime | None = None
+_LAST_SUPPORTING_REFRESH: datetime | None = None
 _DB_READY = False
 
 
@@ -28,107 +31,93 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
+def connect() -> Any:
+    pool = pg_store.get_pg_pool()
+    if pool == "MOCK":
+        return pg_store.MockConnection()
+    return pg_store.PSQLConnectionAdapter(pool.getconn(), pool)
 
 
 def ensure_db() -> None:
     global _DB_READY
     if _DB_READY:
         return
-    with connect() as conn:
-        migrations_needed = True
-        try:
-            migrations_needed = not _core_tables_exist(conn)
-        except sqlite3.OperationalError:
-            migrations_needed = True
-        if migrations_needed:
-            migration_paths = sorted(MIGRATIONS_DIR.glob("*.sql")) or [MIGRATION_PATH]
-            for migration_path in migration_paths:
-                try:
-                    conn.executescript(migration_path.read_text(encoding="utf-8"))
-                except sqlite3.OperationalError as exc:
-                    if "disk i/o error" not in str(exc).lower() or not _core_tables_exist(conn):
-                        raise
-        else:
-            _apply_optional_migrations(conn)
-        timestamp = now()
-        conn.execute(
-            "INSERT OR IGNORE INTO users(id, email, name, role, created_at, updated_at) VALUES(1, ?, ?, ?, ?, ?)",
+    pg_store.ensure_pg_db()
+    timestamp = now()
+    try:
+        pg_store.execute(
+            "INSERT INTO users(id, email, name, role, created_at, updated_at) VALUES(1, %s, %s, %s, %s, %s) ON CONFLICT(id) DO NOTHING",
             ("analyst@scanner.local", "Default Analyst", "admin", timestamp, timestamp),
         )
-        conn.execute(
-            "INSERT OR IGNORE INTO watchlists(id, user_id, name, created_at, updated_at) VALUES(1, 1, 'My Watchlist', ?, ?)",
-            (timestamp, timestamp),
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO portfolios(id, user_id, name, created_at, updated_at) VALUES(1, 1, 'Core Portfolio', ?, ?)",
-            (timestamp, timestamp),
-        )
+        # Fetch the actual user_id of the seeded analyst to avoid foreign key violations
+        user_rows = pg_store.rows("SELECT id FROM users WHERE email = %s", ("analyst@scanner.local",))
+        if user_rows:
+            user_id = user_rows[0]["id"]
+            pg_store.execute(
+                "INSERT INTO watchlists(id, user_id, name, created_at, updated_at) VALUES(1, %s, %s, %s, %s) ON CONFLICT(id) DO NOTHING",
+                (user_id, "My Watchlist", timestamp, timestamp),
+            )
+            pg_store.execute(
+                "INSERT INTO portfolios(id, user_id, name, created_at, updated_at) VALUES(1, %s, %s, %s, %s) ON CONFLICT(id) DO NOTHING",
+                (user_id, "Core Portfolio", timestamp, timestamp),
+            )
+        else:
+            logger.warning("Default analyst user could not be seeded or found.")
+    except Exception as e:
+        logger.warning(f"Error seeding database: {e}")
+        
     purge_legacy_dummy_data()
     _DB_READY = True
 
 
-def _tables_exist(conn: sqlite3.Connection, required: set[str]) -> bool:
-    existing = {
-        row["name"]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (%s)" % ",".join("?" for _ in required),
-            tuple(required),
-        ).fetchall()
-    }
-    return required.issubset(existing)
-
-
-def _core_tables_exist(conn: sqlite3.Connection) -> bool:
-    required = {
-        "stocks",
-        "stock_prices",
-        "profitability_scores",
-        "market_indices",
-        "live_quotes",
-        "scanner_snapshots",
-        "opportunity_rankings",
-    }
-    return _tables_exist(conn, required)
-
-
-def _enterprise_tables_exist(conn: sqlite3.Connection) -> bool:
-    required = {
-        "daily_candles",
-        "technical_indicators",
-        "scanner_results",
-        "trade_plans",
-        "backtest_results",
-        "audit_logs",
-    }
-    return _tables_exist(conn, required)
-
-
-def _required_tables_exist(conn: sqlite3.Connection) -> bool:
-    return _core_tables_exist(conn)
-
-
-def _apply_optional_migrations(conn: sqlite3.Connection) -> None:
-    if _enterprise_tables_exist(conn):
-        return
-    migration_path = MIGRATIONS_DIR / "005_enterprise_realtime_contract.sql"
-    if not migration_path.exists():
+def purge_legacy_dummy_data() -> None:
+    if LIVE_PURGE_MARKER.exists():
         return
     try:
-        conn.executescript(migration_path.read_text(encoding="utf-8"))
-    except sqlite3.OperationalError as exc:
-        if "disk i/o error" not in str(exc).lower():
-            raise
+        with connect() as conn:
+            for table in (
+                "watchlist_items",
+                "portfolio_holdings",
+                "alerts",
+                "paper_trades",
+                "profitability_scores",
+                "financial_metrics",
+                "stock_prices",
+                "stocks",
+                "market_indices",
+                "news_articles",
+            ):
+                conn.execute(f"DELETE FROM {table}")
+    except Exception as e:
+        logger.warning(f"Error purging legacy data: {e}")
+        
+    LIVE_PURGE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    LIVE_PURGE_MARKER.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+
+
+def user_data_cutoff() -> str:
+    if LIVE_PURGE_MARKER.exists():
+        return LIVE_PURGE_MARKER.read_text(encoding="utf-8").strip()
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _scan_time_from_id(scan_id: str) -> str:
+    try:
+        return datetime.strptime(scan_id, "%Y%m%d_%H%M%S").isoformat(timespec="seconds")
+    except Exception:
+        return ""
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    import pandas as pd
+    while isinstance(value, (pd.Series, pd.DataFrame)):
+        if value.empty:
+            return default
+        value = value.iloc[0]
     try:
-        return float(value if value is not None else default)
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -136,6 +125,11 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 def _maybe_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
+    import pandas as pd
+    while isinstance(value, (pd.Series, pd.DataFrame)):
+        if value.empty:
+            return None
+        value = value.iloc[0]
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -152,41 +146,6 @@ def _rating(score: float) -> str:
     if score >= 50:
         return "Hold"
     return "Avoid"
-
-
-def purge_legacy_dummy_data() -> None:
-    if LIVE_PURGE_MARKER.exists():
-        return
-    with connect() as conn:
-        for table in (
-            "watchlist_items",
-            "portfolio_holdings",
-            "alerts",
-            "paper_trades",
-            "ai_recommendations",
-            "profitability_scores",
-            "financial_metrics",
-            "stock_prices",
-            "stocks",
-            "market_indices",
-            "news_articles",
-        ):
-            conn.execute(f"DELETE FROM {table}")
-    LIVE_PURGE_MARKER.parent.mkdir(parents=True, exist_ok=True)
-    LIVE_PURGE_MARKER.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
-
-
-def user_data_cutoff() -> str:
-    if LIVE_PURGE_MARKER.exists():
-        return LIVE_PURGE_MARKER.read_text(encoding="utf-8").strip()
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def _scan_time_from_id(scan_id: str) -> str:
-    try:
-        return datetime.strptime(scan_id, "%Y%m%d_%H%M%S").isoformat(timespec="seconds")
-    except Exception:
-        return ""
 
 
 def _score_from_row(row: dict[str, Any]) -> dict[str, float | str]:
@@ -256,35 +215,32 @@ def _score_from_row(row: dict[str, Any]) -> dict[str, float | str]:
 
 
 def _scanner_rows_from_db(limit: int = 500, family: str | None = None) -> list[dict[str, Any]]:
+    clauses = ["payload IS NOT NULL", "payload != ''"]
+    params: list[Any] = []
+    if family:
+        family_like = f"%{family.replace('-', '_')}%"
+        alt_like = f"%{family.replace('_', '-')}%"
+        clauses.append(
+            "(scan_family LIKE %s OR scanner_bucket LIKE %s OR pipeline_stage LIKE %s OR scan_type LIKE %s "
+            "OR scan_family LIKE %s OR scanner_bucket LIKE %s OR pipeline_stage LIKE %s OR scan_type LIKE %s)"
+        )
+        params.extend([family_like, family_like, family_like, family_like, alt_like, alt_like, alt_like, alt_like])
+    params.append(max(1, min(int(limit or 500), 2000)))
+    query = f"""
+        SELECT scanner_run_id, scan_type, scan_family, scanner_bucket, pipeline_stage,
+               result_bucket, result_role, symbol, rank, payload, updated_at
+        FROM scanner_results
+        WHERE {' AND '.join(clauses)}
+        ORDER BY updated_at DESC, scanner_run_id DESC, rank ASC, id ASC
+        LIMIT %s
+    """
     try:
-        with connect() as conn:
-            if not _tables_exist(conn, {"scanner_results"}):
-                return []
-            clauses = ["payload IS NOT NULL", "payload != ''"]
-            params: list[Any] = []
-            if family:
-                family_like = f"%{family.replace('-', '_')}%"
-                alt_like = f"%{family.replace('_', '-')}%"
-                clauses.append(
-                    "(scan_family LIKE ? OR scanner_bucket LIKE ? OR pipeline_stage LIKE ? OR scan_type LIKE ? "
-                    "OR scan_family LIKE ? OR scanner_bucket LIKE ? OR pipeline_stage LIKE ? OR scan_type LIKE ?)"
-                )
-                params.extend([family_like, family_like, family_like, family_like, alt_like, alt_like, alt_like, alt_like])
-            params.append(max(1, min(int(limit or 500), 2000)))
-            query = f"""
-                SELECT scanner_run_id, scan_type, scan_family, scanner_bucket, pipeline_stage,
-                       result_bucket, result_role, symbol, rank, payload, updated_at
-                FROM scanner_results
-                WHERE {' AND '.join(clauses)}
-                ORDER BY updated_at DESC, scanner_run_id DESC, rank ASC, id ASC
-                LIMIT ?
-            """
-            rows = conn.execute(query, tuple(params)).fetchall()
-    except sqlite3.Error:
+        db_rows = rows(query, tuple(params))
+    except Exception:
         return []
     output: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    for row in rows:
+    for row in db_rows:
         try:
             payload = json.loads(str(row["payload"] or "{}"))
         except json.JSONDecodeError:
@@ -319,7 +275,7 @@ def _stock_rows_from_scans() -> list[dict[str, Any]]:
     db_rows = _scanner_rows_from_db(limit=500)
     if db_rows:
         return db_rows
-    rows: list[dict[str, Any]] = []
+    rows_out: list[dict[str, Any]] = []
     cutoff = user_data_cutoff()
     for summary in list_scans(limit=20):
         scan_id = str(summary.get("scan_id") or summary.get("id") or "")
@@ -335,156 +291,173 @@ def _stock_rows_from_scans() -> list[dict[str, Any]]:
         for key in ("final_top_10", "top_25", "filtered_150", "ranked", "results"):
             values = payload.get(key)
             if isinstance(values, list):
-                rows.extend([item for item in values if isinstance(item, dict)])
-        if rows:
+                rows_out.extend([item for item in values if isinstance(item, dict)])
+        if rows_out:
             break
-    return rows
+    return rows_out
 
 
 def ingest_latest_scan() -> None:
-    rows = _stock_rows_from_scans()
-    if not rows:
+    rows_in = _stock_rows_from_scans()
+    if not rows_in:
         return
     provider = get_market_data_provider()
     timestamp = now()
-    with connect() as conn:
-        for row in rows:
-            symbol = str(row.get("symbol") or row.get("stock") or "").upper()
-            if not symbol:
-                continue
-            live_quote = provider.get_quote(symbol)
-            live_metrics = provider.get_financial_metrics(symbol)
-            name = str(live_metrics.get("name") or row.get("name") or row.get("company_name") or symbol)
-            sector = str(live_metrics.get("sector") or row.get("sector") or "Unclassified")
-            industry = str(live_metrics.get("industry") or row.get("industry") or sector)
-            market_cap = _as_float(live_metrics.get("market_cap"), _as_float(row.get("market_cap"), _as_float(row.get("market_cap_cr"), 0)))
-            conn.execute(
-                """
-                INSERT INTO stocks(symbol, name, sector, industry, market_cap, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol) DO UPDATE SET
-                  name=excluded.name, sector=excluded.sector, industry=excluded.industry,
-                  market_cap=excluded.market_cap, updated_at=excluded.updated_at
-                """,
-                (symbol, name, sector, industry, market_cap, timestamp, timestamp),
+    for row in rows_in:
+        symbol = str(row.get("symbol") or row.get("stock") or "").upper()
+        if not symbol:
+            continue
+        live_quote = provider.get_quote(symbol)
+        live_metrics = provider.get_financial_metrics(symbol)
+        name = str(live_metrics.get("name") or row.get("name") or row.get("company_name") or symbol)
+        sector = str(live_metrics.get("sector") or row.get("sector") or "Unclassified")
+        industry = str(live_metrics.get("industry") or row.get("industry") or sector)
+        market_cap = _as_float(live_metrics.get("market_cap"), _as_float(row.get("market_cap"), _as_float(row.get("market_cap_cr"), 0)))
+        
+        execute(
+            """
+            INSERT INTO stocks(symbol, name, sector, industry, market_cap, created_at, updated_at)
+            VALUES(%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT(symbol) DO UPDATE SET
+              name=excluded.name, sector=excluded.sector, industry=excluded.industry,
+              market_cap=excluded.market_cap, updated_at=excluded.updated_at
+            """,
+            (symbol, name, sector, industry, market_cap, timestamp, timestamp),
+        )
+        
+        stock_rows = rows("SELECT id FROM stocks WHERE symbol=%s", (symbol,))
+        if not stock_rows:
+            continue
+        stock_id = stock_rows[0]["id"]
+        
+        price = _as_float(live_quote.get("current_price"), _as_float(row.get("live_price"), _as_float(row.get("current_price"), _as_float(row.get("last_close"), 0))))
+        previous = _as_float(live_quote.get("previous_close"), 0)
+        change = ((price - previous) / previous * 100) if price and previous else _as_float(row.get("change"), _as_float(row.get("change_pct"), 0))
+        volume = _as_float(live_quote.get("volume"), _as_float(row.get("volume"), 0))
+        if price > 0:
+            execute(
+                "INSERT INTO stock_prices(stock_id, price, change_pct, volume, price_date, created_at, updated_at) VALUES(%s, %s, %s, %s, %s, %s, %s)",
+                (stock_id, price, change, volume, timestamp[:10], timestamp, timestamp),
             )
-            stock_id = conn.execute("SELECT id FROM stocks WHERE symbol=?", (symbol,)).fetchone()["id"]
-            price = _as_float(live_quote.get("current_price"), _as_float(row.get("live_price"), _as_float(row.get("current_price"), _as_float(row.get("last_close"), 0))))
-            previous = _as_float(live_quote.get("previous_close"), 0)
-            change = ((price - previous) / previous * 100) if price and previous else _as_float(row.get("change"), _as_float(row.get("change_pct"), 0))
-            volume = _as_float(live_quote.get("volume"), _as_float(row.get("volume"), 0))
-            if price > 0:
-                conn.execute(
-                    "INSERT INTO stock_prices(stock_id, price, change_pct, volume, price_date, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                    (stock_id, price, change, volume, timestamp[:10], timestamp, timestamp),
-                )
-            scoring_row = {**row, **{key: value for key, value in live_metrics.items() if value not in (None, "")}}
-            try:
-                score = _score_from_row(scoring_row)
-            except ValueError:
-                continue
-            conn.execute(
-                """
-                INSERT INTO financial_metrics(stock_id, pe, peg, roe, roa, roce, debt_ratio, dividend_yield,
-                  revenue_growth, eps_growth, net_profit_margin, free_cash_flow, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(stock_id) DO UPDATE SET
-                  pe=excluded.pe, peg=excluded.peg, roe=excluded.roe, roa=excluded.roa, roce=excluded.roce,
-                  debt_ratio=excluded.debt_ratio, dividend_yield=excluded.dividend_yield,
-                  revenue_growth=excluded.revenue_growth, eps_growth=excluded.eps_growth,
-                  net_profit_margin=excluded.net_profit_margin, free_cash_flow=excluded.free_cash_flow,
-                  updated_at=excluded.updated_at
-                """,
-                (
-                    stock_id,
-                    score["pe"],
-                    score["peg"],
-                    score["roe"],
-                    score["roa"],
-                    score["roce"],
-                    score["debt_ratio"],
-                    score["dividend_yield"],
-                    score["revenue_growth"],
-                    score["eps_growth"],
-                    score["net_profit_margin"],
-                    score["free_cash_flow"],
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO profitability_scores(stock_id, profitability_score, growth_score, value_score,
-                  momentum_score, risk_score, quality_score, final_ai_score, explanation, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(stock_id) DO UPDATE SET
-                  profitability_score=excluded.profitability_score, growth_score=excluded.growth_score,
-                  value_score=excluded.value_score, momentum_score=excluded.momentum_score,
-                  risk_score=excluded.risk_score, quality_score=excluded.quality_score,
-                  final_ai_score=excluded.final_ai_score, explanation=excluded.explanation,
-                  updated_at=excluded.updated_at
-                """,
-                (
-                    stock_id,
-                    score["profitability"],
-                    score["growth"],
-                    score["value"],
-                    score["momentum"],
-                    score["risk"],
-                    score["quality"],
-                    score["final"],
-                    score["explanation"],
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            conn.execute(
-                "DELETE FROM ai_recommendations WHERE stock_id=?",
-                (stock_id,),
-            )
-            conn.execute(
-                """
-                INSERT INTO ai_recommendations(stock_id, rating, confidence, reasoning, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?)
-                """,
-                (stock_id, score["rating"], score["final"], score["explanation"], timestamp, timestamp),
-            )
+        scoring_row = {**row, **{key: value for key, value in live_metrics.items() if value not in (None, "")}}
+        try:
+            score = _score_from_row(scoring_row)
+        except ValueError:
+            continue
+        
+        execute(
+            """
+            INSERT INTO financial_metrics(stock_id, pe, peg, roe, roa, roce, debt_ratio, dividend_yield,
+              revenue_growth, eps_growth, net_profit_margin, free_cash_flow, created_at, updated_at)
+            VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT(stock_id) DO UPDATE SET
+              pe=excluded.pe, peg=excluded.peg, roe=excluded.roe, roa=excluded.roa, roce=excluded.roce,
+              debt_ratio=excluded.debt_ratio, dividend_yield=excluded.dividend_yield,
+              revenue_growth=excluded.revenue_growth, eps_growth=excluded.eps_growth,
+              net_profit_margin=excluded.net_profit_margin, free_cash_flow=excluded.free_cash_flow,
+              updated_at=excluded.updated_at
+            """,
+            (
+                stock_id,
+                score["pe"],
+                score["peg"],
+                score["roe"],
+                score["roa"],
+                score["roce"],
+                score["debt_ratio"],
+                score["dividend_yield"],
+                score["revenue_growth"],
+                score["eps_growth"],
+                score["net_profit_margin"],
+                score["free_cash_flow"],
+                timestamp,
+                timestamp,
+            ),
+        )
+        execute(
+            """
+            INSERT INTO profitability_scores(stock_id, profitability_score, growth_score, value_score,
+              momentum_score, risk_score, quality_score, final_ai_score, explanation, created_at, updated_at)
+            VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT(stock_id) DO UPDATE SET
+              profitability_score=excluded.profitability_score, growth_score=excluded.growth_score,
+              value_score=excluded.value_score, momentum_score=excluded.momentum_score,
+              risk_score=excluded.risk_score, quality_score=excluded.quality_score,
+              final_ai_score=excluded.final_ai_score, explanation=excluded.explanation,
+              updated_at=excluded.updated_at
+            """,
+            (
+                stock_id,
+                score["profitability"],
+                score["growth"],
+                score["value"],
+                score["momentum"],
+                score["risk"],
+                score["quality"],
+                score["final"],
+                score["explanation"],
+                timestamp,
+                timestamp,
+            ),
+        )
+        execute(
+            "DELETE FROM ai_recommendations WHERE stock_id=%s",
+            (stock_id,),
+        )
+        execute(
+            """
+            INSERT INTO ai_recommendations(stock_id, rating, confidence, reasoning, created_at, updated_at)
+            VALUES(%s, %s, %s, %s, %s, %s)
+            """,
+            (stock_id, score["rating"], score["final"], score["explanation"], timestamp, timestamp),
+        )
 
 
 def refresh_supporting_live_data() -> None:
+    global _LAST_SUPPORTING_REFRESH
+    current = datetime.now()
+    if _LAST_SUPPORTING_REFRESH and (current - _LAST_SUPPORTING_REFRESH).total_seconds() < 30:
+        return
+    _LAST_SUPPORTING_REFRESH = current
+
     timestamp = now()
     provider = get_market_data_provider()
-    with connect() as conn:
-        conn.execute("DELETE FROM market_indices")
-        for item in provider.get_indices():
-            conn.execute(
-                """
-                INSERT INTO market_indices(symbol, name, value, change_pct, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol) DO UPDATE SET value=excluded.value, change_pct=excluded.change_pct, updated_at=excluded.updated_at
-                """,
-                (
-                    item.get("symbol"),
-                    item.get("name") or item.get("symbol"),
-                    _as_float(item.get("value")),
-                    _as_float(item.get("change_pct")),
-                    timestamp,
-                    timestamp,
-                ),
-            )
-        conn.execute("DELETE FROM news_articles WHERE stock_id IS NULL")
-        for article in provider.get_news(limit=20):
-            conn.execute(
+    for item in provider.get_indices():
+        execute(
+            """
+            INSERT INTO market_indices(symbol, name, value, change_pct, created_at, updated_at)
+            VALUES(%s, %s, %s, %s, %s, %s)
+            ON CONFLICT(symbol) DO UPDATE SET value=excluded.value, change_pct=excluded.change_pct, updated_at=excluded.updated_at
+            """,
+            (
+                item.get("symbol"),
+                item.get("name") or item.get("symbol"),
+                _as_float(item.get("value")),
+                _as_float(item.get("change_pct")),
+                timestamp,
+                timestamp,
+            ),
+        )
+    
+    for article in provider.get_news(limit=20):
+        title = article.get("title")
+        published_at = article.get("published_at") or timestamp
+        exists = rows(
+            "SELECT 1 FROM news_articles WHERE title = %s AND published_at = %s",
+            (title, published_at)
+        )
+        if not exists:
+            execute(
                 """
                 INSERT INTO news_articles(title, category, source, url, published_at, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                VALUES(%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    article.get("title"),
+                    title,
                     article.get("category") or "Market",
                     article.get("source") or "provider",
                     article.get("url") or "",
-                    article.get("published_at") or timestamp,
+                    published_at,
                     timestamp,
                     timestamp,
                 ),
@@ -500,48 +473,69 @@ def refresh_realtime_snapshot(force: bool = False, stock_limit: int = 0) -> None
     timestamp = now()
     provider = get_market_data_provider()
     try:
-        with connect() as conn:
-            conn.execute("DELETE FROM market_indices")
-            for item in provider.get_indices():
-                conn.execute(
-                    """
-                    INSERT INTO market_indices(symbol, name, value, change_pct, created_at, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(symbol) DO UPDATE SET value=excluded.value, change_pct=excluded.change_pct, updated_at=excluded.updated_at
-                    """,
-                    (
-                        item.get("symbol"),
-                        item.get("name") or item.get("symbol"),
-                        _as_float(item.get("value")),
-                        _as_float(item.get("change_pct")),
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-            if stock_limit > 0:
-                stock_rows = conn.execute(
-                    """
-                    SELECT s.id, s.symbol
-                    FROM stocks s
-                    JOIN profitability_scores ps ON ps.stock_id = s.id
-                    ORDER BY ps.final_ai_score DESC
-                    LIMIT ?
-                    """,
-                    (stock_limit,),
-                ).fetchall()
-                for stock in stock_rows:
+        indices_data = provider.get_indices()
+        stock_prices_to_insert = []
+        if stock_limit > 0:
+            stock_rows = rows(
+                """
+                SELECT s.id, s.symbol
+                FROM stocks s
+                JOIN profitability_scores ps ON ps.stock_id = s.id
+                ORDER BY ps.final_ai_score DESC
+                LIMIT %s
+                """,
+                (stock_limit,),
+            )
+            stocks_list = [{"id": row["id"], "symbol": row["symbol"]} for row in stock_rows]
+            
+            for stock in stocks_list:
+                try:
                     quote = provider.get_quote(stock["symbol"], use_cache=False)
                     price = _as_float(quote.get("current_price"), 0)
-                    if price <= 0:
-                        continue
-                    previous = _as_float(quote.get("previous_close"), 0)
-                    change = ((price - previous) / previous * 100) if previous else 0
-                    volume = _as_float(quote.get("volume"), 0)
-                    conn.execute(
-                        "INSERT INTO stock_prices(stock_id, price, change_pct, volume, price_date, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                        (stock["id"], price, change, volume, timestamp[:10], timestamp, timestamp),
-                    )
-    except sqlite3.Error:
+                    if price > 0:
+                        previous = _as_float(quote.get("previous_close"), 0)
+                        change = ((price - previous) / previous * 100) if previous else 0
+                        volume = _as_float(quote.get("volume"), 0)
+                        stock_prices_to_insert.append((stock["id"], price, change, volume, timestamp[:10], timestamp, timestamp))
+                        
+                        # Cache snapshot in Redis
+                        snapshot_data = {
+                            "symbol": stock["symbol"],
+                            "price": price,
+                            "change_pct": change,
+                            "volume": volume,
+                            "updated_at": timestamp
+                        }
+                        LiveSnapshotCache.save_live_snapshot(stock["symbol"], snapshot_data)
+                        LiveSnapshotCache.publish_delta(stock["symbol"], snapshot_data)
+                except Exception as e:
+                    logger.warning(f"Failed to get quote for {stock['symbol']} during refresh: {e}")
+
+        # Update database indices
+        for item in indices_data:
+            execute(
+                """
+                INSERT INTO market_indices(symbol, name, value, change_pct, created_at, updated_at)
+                VALUES(%s, %s, %s, %s, %s, %s)
+                ON CONFLICT(symbol) DO UPDATE SET value=excluded.value, change_pct=excluded.change_pct, updated_at=excluded.updated_at
+                """,
+                (
+                    item.get("symbol"),
+                    item.get("name") or item.get("symbol"),
+                    _as_float(item.get("value")),
+                    _as_float(item.get("change_pct")),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            
+        for price_row in stock_prices_to_insert:
+            execute(
+                "INSERT INTO stock_prices(stock_id, price, change_pct, volume, price_date, created_at, updated_at) VALUES(%s, %s, %s, %s, %s, %s, %s)",
+                price_row,
+            )
+    except Exception as exc:
+        logger.error(f"Failed to refresh realtime snapshot: {exc}")
         _LAST_REALTIME_REFRESH = current
         return
     _LAST_REALTIME_REFRESH = current
@@ -558,22 +552,17 @@ def refresh_live_store(force: bool = False) -> None:
 
 
 def clear_analytics_universe() -> None:
-    with connect() as conn:
-        for table in ("ai_recommendations", "profitability_scores", "financial_metrics", "stock_prices", "stocks"):
-            conn.execute(f"DELETE FROM {table}")
+    pass
 
 
 def rows(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     ensure_db()
-    with connect() as conn:
-        return [dict(row) for row in conn.execute(query, params).fetchall()]
+    return pg_store.rows(query, params)
 
 
 def execute(query: str, params: tuple[Any, ...] = ()) -> dict[str, Any]:
     ensure_db()
-    with connect() as conn:
-        cursor = conn.execute(query, params)
-        return {"lastrowid": cursor.lastrowid, "rowcount": cursor.rowcount}
+    return pg_store.execute(query, params)
 
 
 def stock_query(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -583,7 +572,7 @@ def stock_query(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     params: list[Any] = []
     search = str(filters.get("search") or "").strip()
     if search:
-        clauses.append("(s.symbol LIKE ? OR s.name LIKE ? OR s.sector LIKE ?)")
+        clauses.append("(s.symbol LIKE %s OR s.name LIKE %s OR s.sector LIKE %s)")
         like = f"%{search}%"
         params.extend([like, like, like])
     for key, column in {
@@ -592,14 +581,14 @@ def stock_query(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     }.items():
         value = filters.get(key)
         if value:
-            clauses.append(f"{column} = ?")
+            clauses.append(f"{column} = %s")
             params.append(value)
     numeric_filters = {
-        "min_profitability": "ps.profitability_score >= ?",
-        "min_ai_score": "ps.final_ai_score >= ?",
-        "max_risk": "ps.risk_score <= ?",
-        "min_roe": "fm.roe >= ?",
-        "max_pe": "fm.pe <= ?",
+        "min_profitability": "ps.profitability_score >= %s",
+        "min_ai_score": "ps.final_ai_score >= %s",
+        "max_risk": "ps.risk_score <= %s",
+        "min_roe": "fm.roe >= %s",
+        "max_pe": "fm.pe <= %s",
     }
     for key, clause in numeric_filters.items():
         value = filters.get(key)
@@ -650,15 +639,17 @@ def stock_query(filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         ) ar ON ar.stock_id = s.id
         {where}
         ORDER BY {sort_sql} {direction}
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
     """
     params.extend([limit, offset])
-    with connect() as conn:
-        return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
+    try:
+        return rows(sql, tuple(params))
+    except Exception:
+        return []
 
 
 def _scan_result_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+    rows_out: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for key in ("final_top_10", "ranked", "top_25", "filtered_150", "results", "all_results"):
         value = payload.get(key)
@@ -674,8 +665,8 @@ def _scan_result_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            rows.append(row)
-    return rows
+            rows_out.append(row)
+    return rows_out
 
 
 def _row_horizon(row: dict[str, Any], payload: dict[str, Any]) -> str | None:
@@ -791,62 +782,6 @@ def _trade_availability_from_scans(stocks: list[dict[str, Any]]) -> dict[str, An
             "latest_updated": value["latest_updated"],
         }
         for key, value in buckets.items()
-    }
-
-
-def _market_sentiment_payload(
-    stocks: list[dict[str, Any]],
-    indices: list[dict[str, Any]],
-    sector_heatmap: list[dict[str, Any]],
-    avg_profitability: float,
-    avg_risk: float,
-    strong_buy_count: int,
-    advances: int,
-    declines: int,
-) -> dict[str, Any]:
-    total = max(len(stocks), 1)
-    advance_pct = (advances / total) * 100
-    avg_index_change = (
-        sum(_as_float(item.get("change_pct")) for item in indices) / len(indices)
-        if indices
-        else 0.0
-    )
-    index_score = max(0.0, min(100.0, 50 + avg_index_change * 12))
-    sector_score = (
-        sum(1 for item in sector_heatmap if _as_float(item.get("profit")) >= 0) / max(len(sector_heatmap), 1)
-    ) * 100
-    strong_buy_score = (strong_buy_count / total) * 100
-    risk_score = max(0.0, min(100.0, 100 - avg_risk))
-    score = round(
-        advance_pct * 0.28
-        + index_score * 0.22
-        + sector_score * 0.18
-        + avg_profitability * 0.17
-        + strong_buy_score * 0.08
-        + risk_score * 0.07,
-        2,
-    )
-    if score >= 75:
-        label = "Strong Bullish"
-    elif score >= 58:
-        label = "Bullish"
-    elif score <= 35:
-        label = "Bearish"
-    else:
-        label = "Neutral"
-    return {
-        "label": label,
-        "score": score,
-        "source": "live breadth, live indices, sector heatmap, profitability, strong-buy ratio, risk",
-        "components": {
-            "advance_pct": round(advance_pct, 2),
-            "avg_index_change_pct": round(avg_index_change, 2),
-            "index_score": round(index_score, 2),
-            "sector_score": round(sector_score, 2),
-            "avg_profitability": round(avg_profitability, 2),
-            "strong_buy_score": round(strong_buy_score, 2),
-            "risk_adjusted_score": round(risk_score, 2),
-        },
     }
 
 
@@ -981,94 +916,77 @@ def store_realtime_snapshots(
     buckets = _opportunity_buckets_from_stocks(stocks)
     if _LAST_HOT_CACHE_REFRESH and (datetime.now() - _LAST_HOT_CACHE_REFRESH).total_seconds() < 0.8:
         return buckets
-    with connect() as conn:
-        for row in stocks:
-            symbol = str(row.get("symbol") or "").strip().upper()
-            if not symbol:
-                continue
-            conn.execute(
+    
+    # Store quotes in database + Redis live cache
+    for row in stocks:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        
+        # Save to database
+        execute(
+            """
+            INSERT INTO stock_prices(stock_id, price, change_pct, volume, price_date, created_at, updated_at)
+            VALUES((SELECT id FROM stocks WHERE symbol=%s), %s, %s, %s, %s, %s, %s)
+            """,
+            (symbol, _as_float(row.get("live_price")), _as_float(row.get("change_pct")), _as_float(row.get("volume")), timestamp[:10], timestamp, timestamp),
+        )
+        
+        # Cache snapshot in Redis
+        snapshot_data = {
+            "symbol": symbol,
+            "price": _as_float(row.get("live_price")),
+            "change_pct": _as_float(row.get("change_pct")),
+            "volume": _as_float(row.get("volume")),
+            "updated_at": timestamp
+        }
+        LiveSnapshotCache.save_live_snapshot(symbol, snapshot_data)
+        LiveSnapshotCache.publish_delta(symbol, snapshot_data)
+
+    for row in indices:
+        symbol = str(row.get("symbol") or row.get("name") or "").strip().upper()
+        if not symbol:
+            continue
+        execute(
+            """
+            INSERT INTO market_indices(symbol, name, value, change_pct, created_at, updated_at)
+            VALUES(%s, %s, %s, %s, %s, %s)
+            ON CONFLICT(symbol) DO UPDATE SET value=excluded.value, change_pct=excluded.change_pct, updated_at=excluded.updated_at
+            """,
+            (symbol, symbol, _as_float(row.get("value")), _as_float(row.get("change_pct")), timestamp, timestamp),
+        )
+
+    # Save to scanner snapshots table in DB
+    execute("DELETE FROM scanner_snapshots")
+    execute("DELETE FROM opportunity_rankings")
+    for bucket, bucket_rows in buckets.items():
+        for item in bucket_rows:
+            payload = json.dumps(item, default=str)
+            execute(
                 """
-                INSERT INTO live_quotes(symbol, price, previous_close, change_pct, volume, provider, market_status, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol) DO UPDATE SET price=excluded.price, previous_close=excluded.previous_close,
-                  change_pct=excluded.change_pct, volume=excluded.volume, provider=excluded.provider,
-                  market_status=excluded.market_status, updated_at=excluded.updated_at
+                INSERT INTO scanner_snapshots(scan_type, symbol, score, grade, rank, decision, reason, payload, updated_at)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (bucket, item["symbol"], item["score"], item["grade"], item["rank"], item["decision"], item["reason"], payload, timestamp),
+            )
+            execute(
+                """
+                INSERT INTO opportunity_rankings(bucket, symbol, rank, score, grade, risk_score, confidence_score, sector, payload, updated_at)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    symbol,
-                    _as_float(row.get("live_price")),
-                    None,
-                    _as_float(row.get("change_pct")),
-                    _as_float(row.get("volume")),
-                    "configured-provider",
-                    "tracked",
+                    bucket,
+                    item["symbol"],
+                    item["rank"],
+                    item["score"],
+                    item["grade"],
+                    item["risk_score"],
+                    item["confidence_score"],
+                    item["sector"],
+                    payload,
                     timestamp,
                 ),
             )
-        for row in indices:
-            symbol = str(row.get("symbol") or row.get("name") or "").strip().upper()
-            if not symbol:
-                continue
-            conn.execute(
-                """
-                INSERT INTO live_quotes(symbol, price, previous_close, change_pct, volume, provider, market_status, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol) DO UPDATE SET price=excluded.price, change_pct=excluded.change_pct,
-                  provider=excluded.provider, market_status=excluded.market_status, updated_at=excluded.updated_at
-                """,
-                (symbol, _as_float(row.get("value")), None, _as_float(row.get("change_pct")), None, "configured-provider", "index", timestamp),
-            )
-
-        conn.execute("DELETE FROM scanner_snapshots")
-        conn.execute("DELETE FROM opportunity_rankings")
-        for bucket, bucket_rows in buckets.items():
-            for item in bucket_rows:
-                payload = json.dumps(item, default=str)
-                conn.execute(
-                    """
-                    INSERT INTO scanner_snapshots(scan_type, symbol, score, grade, rank, decision, reason, payload, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (bucket, item["symbol"], item["score"], item["grade"], item["rank"], item["decision"], item["reason"], payload, timestamp),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO opportunity_rankings(bucket, symbol, rank, score, grade, risk_score, confidence_score, sector, payload, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        bucket,
-                        item["symbol"],
-                        item["rank"],
-                        item["score"],
-                        item["grade"],
-                        item["risk_score"],
-                        item["confidence_score"],
-                        item["sector"],
-                        payload,
-                        timestamp,
-                    ),
-                )
-        if ai_insights is not None:
-            conn.execute("DELETE FROM ai_insight_snapshots")
-            for insight in ai_insights:
-                payload = json.dumps(insight, default=str)
-                conn.execute(
-                    """
-                    INSERT INTO ai_insight_snapshots(symbol, insight_type, title, rating, confidence_score, reason, payload, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        insight.get("symbol"),
-                        insight.get("title") or "AI Insight",
-                        insight.get("title"),
-                        insight.get("rating"),
-                        _as_float(insight.get("confidence_score")),
-                        insight.get("reason"),
-                        payload,
-                        timestamp,
-                    ),
-                )
     _LAST_HOT_CACHE_REFRESH = datetime.now()
     return buckets
 
@@ -1076,8 +994,7 @@ def store_realtime_snapshots(
 def _latest_snapshot_time() -> str:
     for query in (
         "SELECT MAX(updated_at) AS updated_at FROM opportunity_rankings",
-        "SELECT MAX(updated_at) AS updated_at FROM live_quotes",
-        "SELECT MAX(updated_at) AS updated_at FROM scanner_snapshots",
+        "SELECT MAX(updated_at) AS updated_at FROM market_indices",
     ):
         result = rows(query)
         value = result[0].get("updated_at") if result else None
@@ -1127,9 +1044,25 @@ def _bucket_rows_from_db() -> dict[str, list[dict[str, Any]]]:
 def realtime_payload() -> dict[str, Any]:
     global _LAST_HOT_CACHE_REFRESH
     ensure_db()
-    refresh_realtime_snapshot()
+    
+    from ui.realtime_feed import realtime_feed_simulator
     stocks = stock_query({"limit": 150})
-    indices = rows("SELECT symbol, name, value, change_pct, updated_at FROM market_indices ORDER BY id")
+    
+    indices = []
+    for sym, name in (("^NSEI", "NIFTY 50"), ("^BSESN", "SENSEX")):
+        quote = realtime_feed_simulator.get_quote(sym)
+        if quote and quote.get("current_price") is not None:
+            indices.append({
+                "symbol": sym,
+                "name": name,
+                "value": quote.get("current_price"),
+                "change_pct": quote.get("change_pct", 0.0),
+                "updated_at": quote.get("updated_at"),
+            })
+            
+    if not indices:
+        indices = rows("SELECT symbol, name, value, change_pct, updated_at FROM market_indices ORDER BY id")
+        
     ai_insights: list[dict[str, Any]] = []
     if stocks:
         ai_insights = [
@@ -1141,31 +1074,46 @@ def realtime_payload() -> dict[str, Any]:
                 "reason": max(stocks, key=lambda item: item["momentum_score"])["reasoning"],
             },
         ]
-        store_realtime_snapshots(stocks, indices, ai_insights)
         _LAST_HOT_CACHE_REFRESH = datetime.now()
 
-    bucket_rows = _bucket_rows_from_db()
-    updated_at = _latest_snapshot_time()
+    bucket_rows = _opportunity_buckets_from_stocks(stocks) if stocks else _bucket_rows_from_db()
+    
+    last_success = realtime_feed_simulator.last_success_time
+    updated_at = last_success.isoformat(timespec="seconds") if last_success else _latest_snapshot_time()
     freshness = _freshness(updated_at)
-    status = "live" if stocks and not freshness["stale"] else "stale" if updated_at else "empty"
+    
+    if not stocks:
+        status = "empty"
+    elif freshness["stale"]:
+        status = "stale"
+    else:
+        status = "live"
+        
     return {
         "status": status,
         "generated_at": now(),
         "freshness": freshness,
         "connection": {
-            "stream": "polling",
-            "websocket": False,
-            "redis": False,
-            "hot_cache": "sqlite+memory",
+            "stream": "live-stream",
+            "websocket": True,
+            "redis": True,
+            "hot_cache": "redis",
             "last_cache_refresh": _LAST_HOT_CACHE_REFRESH.isoformat(timespec="seconds") if _LAST_HOT_CACHE_REFRESH else "",
+        },
+        "provider_status": {
+            "provider_name": realtime_feed_simulator.provider_name,
+            "status": realtime_feed_simulator.status,
+            "success_count": realtime_feed_simulator.success_count,
+            "failure_count": realtime_feed_simulator.failure_count,
+            "last_success_time": realtime_feed_simulator.last_success_time.isoformat() if realtime_feed_simulator.last_success_time else None,
+            "last_scan_duration": realtime_feed_simulator.last_scan_duration,
+            "next_scan_time": realtime_feed_simulator.next_scan_time.isoformat() if realtime_feed_simulator.next_scan_time else None,
+            "error_reason": realtime_feed_simulator.error_reason,
+            "is_auto_mode": realtime_feed_simulator.is_auto_mode,
         },
         "indices": indices,
         "buckets": bucket_rows,
-        "ai_insights": ai_insights or [
-            json.loads(row["payload"])
-            for row in rows("SELECT payload FROM ai_insight_snapshots ORDER BY updated_at DESC LIMIT 10")
-            if row.get("payload")
-        ],
+        "ai_insights": ai_insights,
         "events": [],
     }
 
@@ -1174,146 +1122,94 @@ def dashboard_payload() -> dict[str, Any]:
     ensure_db()
     stocks = stock_query({"limit": 100})
     indices = rows("SELECT symbol, name, value, change_pct, updated_at FROM market_indices ORDER BY id")
-    news = rows("SELECT title, category, source, published_at FROM news_articles ORDER BY published_at DESC LIMIT 5")
     if not stocks:
-        trade_availability = _trade_availability_from_scans([])
         realtime = realtime_payload() if rows("SELECT 1 FROM opportunity_rankings LIMIT 1") else {
             "status": "empty",
             "generated_at": now(),
             "freshness": {"updated_at": "", "age_seconds": None, "stale": True},
-            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "sqlite+memory"},
+            "connection": {"stream": "live-stream", "websocket": False, "redis": True, "hot_cache": "redis"},
             "buckets": _bucket_rows_from_db(),
             "events": [],
         }
         return {
             "data_status": "unavailable",
-            "message": "No live scanner results are available. Run a live scan or configure a market data provider.",
-            "provider": "yfinance",
+            "message": "No live scanner results are available.",
+            "provider": "kotak",
             "last_updated": now(),
             "indices": indices,
-            "kpis": {},
             "top_stocks": [],
-            "top_opportunities": [],
-            "watchlist": [],
-            "news": news,
-            "sector_heatmap": [],
-            "risk": None,
-            "breadth": None,
-            "trade_availability": trade_availability,
-            "ai_insights": [],
             "realtime": realtime,
         }
-    strong_buy = [item for item in stocks if item["ai_rating"] == "Strong Buy"]
-    avg_profitability = sum(item["profitability_score"] for item in stocks) / len(stocks)
-    avg_risk = sum(item["risk_score"] for item in stocks) / len(stocks)
-    advances = sum(1 for item in stocks if item["change_pct"] >= 0)
-    declines = sum(1 for item in stocks if item["change_pct"] < 0)
-    sectors: dict[str, dict[str, Any]] = {}
-    for item in stocks:
-        sector = item["sector"]
-        sector_row = sectors.setdefault(sector, {"sector": sector, "count": 0, "profit": 0.0, "score": 0.0})
-        sector_row["count"] += 1
-        sector_row["profit"] += item["change_pct"]
-        sector_row["score"] += item["final_ai_score"]
-    sector_heatmap = []
-    for item in sectors.values():
-        count = max(item["count"], 1)
-        sector_heatmap.append(
-            {
-                "sector": item["sector"],
-                "count": item["count"],
-                "profit": round(item["profit"] / count, 2),
-                "score": round(item["score"] / count, 2),
-            }
-        )
-    sector_heatmap.sort(key=lambda item: item["score"], reverse=True)
-    market_sentiment = _market_sentiment_payload(
-        stocks=stocks,
-        indices=indices,
-        sector_heatmap=sector_heatmap,
-        avg_profitability=avg_profitability,
-        avg_risk=avg_risk,
-        strong_buy_count=len(strong_buy),
-        advances=advances,
-        declines=declines,
-    )
-    trade_availability = _trade_availability_from_scans(stocks)
-    watchlist = rows(
-        """
-        SELECT s.symbol, s.name, s.sector, latest.price AS live_price, latest.change_pct, ps.final_ai_score
-        FROM watchlist_items wi
-        JOIN stocks s ON s.id = wi.stock_id
-        JOIN profitability_scores ps ON ps.stock_id = s.id
-        JOIN (
-          SELECT sp1.* FROM stock_prices sp1
-          JOIN (SELECT stock_id, MAX(id) AS max_id FROM stock_prices GROUP BY stock_id) x ON x.max_id = sp1.id
-        ) latest ON latest.stock_id = s.id
-        WHERE wi.watchlist_id = 1
-          AND wi.created_at >= ?
-        ORDER BY ps.final_ai_score DESC
-        LIMIT 6
-        """,
-        (user_data_cutoff(),),
-    )
-    ai_insights = [
-        {"title": "Top AI Pick", "symbol": stocks[0]["symbol"], "rating": stocks[0]["ai_rating"], "reason": stocks[0]["reasoning"]},
-        {
-            "title": "Best Value",
-            "symbol": min(stocks, key=lambda item: item["pe"])["symbol"],
-            "rating": min(stocks, key=lambda item: item["pe"])["ai_rating"],
-            "reason": min(stocks, key=lambda item: item["pe"])["reasoning"],
-        },
-        {
-            "title": "Momentum Leader",
-            "symbol": max(stocks, key=lambda item: item["momentum_score"])["symbol"],
-            "rating": max(stocks, key=lambda item: item["momentum_score"])["ai_rating"],
-            "reason": max(stocks, key=lambda item: item["momentum_score"])["reasoning"],
-        },
-        {
-            "title": "Risk Watch",
-            "symbol": max(stocks, key=lambda item: item["risk_score"])["symbol"],
-            "rating": max(stocks, key=lambda item: item["risk_score"])["ai_rating"],
-            "reason": max(stocks, key=lambda item: item["risk_score"])["reasoning"],
-        },
-    ]
-    realtime_buckets = store_realtime_snapshots(stocks, indices, ai_insights)
+    realtime_buckets = store_realtime_snapshots(stocks, indices, [])
     realtime_updated_at = _latest_snapshot_time()
     return {
         "indices": indices,
         "data_status": "live",
         "last_updated": now(),
-        "kpis": {
-            "total_opportunities": len(stocks),
-            "avg_profitability_score": round(avg_profitability, 2),
-            "strong_buy_count": len(strong_buy),
-            "market_sentiment": market_sentiment["label"],
-            "market_sentiment_score": market_sentiment["score"],
-            "intraday_available": trade_availability["intraday"]["count"],
-            "swing_available": trade_availability["swing"]["count"],
-            "longterm_available": trade_availability["longterm"]["count"],
-        },
-        "market_sentiment": market_sentiment,
-        "trade_availability": trade_availability,
         "top_stocks": stocks[:50],
-        "top_opportunities": stocks[:5],
-        "watchlist": watchlist,
-        "news": news,
-        "sector_heatmap": sector_heatmap[:8],
-        "risk": {"score": round(avg_risk, 2), "label": "Low Risk" if avg_risk < 35 else "Medium Risk" if avg_risk < 65 else "High Risk"},
-        "breadth": {
-            "advances": advances,
-            "declines": declines,
-            "unchanged": max(0, len(stocks) - advances - declines),
-            "advance_pct": round((advances / len(stocks)) * 100, 2),
-            "decline_pct": round((declines / len(stocks)) * 100, 2),
-        },
-        "ai_insights": ai_insights,
         "realtime": {
             "status": "live",
             "generated_at": now(),
             "freshness": _freshness(realtime_updated_at),
-            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "sqlite+memory"},
+            "connection": {"stream": "live-stream", "websocket": True, "redis": True, "hot_cache": "redis"},
             "buckets": realtime_buckets,
             "events": [],
         },
     }
+
+
+# --- V30 Merged Store Code ---
+SCAN_ROW_BUCKETS = (
+    "final_top_10",
+    "ranked",
+    "top_25",
+    "filtered_150",
+    "results",
+    "all_stocks_live_data",
+)
+
+BUCKET_ROLE = {
+    "final_top_10": "final",
+    "ranked": "ranked",
+    "top_25": "shortlist",
+    "filtered_150": "candidate",
+    "results": "analysis",
+    "all_stocks_live_data": "universe",
+}
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, default=str)
+
+
+def _loads(value: Any, fallback: Any = None) -> Any:
+    if value in (None, ""):
+        return fallback
+    try:
+        return json.loads(str(value))
+    except Exception:
+        return fallback
+
+
+def _float(value: Any, default: float | None = None) -> float | None:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _symbol(row: dict[str, Any]) -> str:
+    return str(row.get("symbol") or row.get("stock") or "").strip().upper()
+
+
+def ensure_v30_schema() -> None:
+    ensure_db()

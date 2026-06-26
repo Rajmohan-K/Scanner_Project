@@ -9,3 +9,8 @@ openpyxl
 aiohttp
 apscheduler>=3.10.0
 pyinstaller>=6.0.0
+uvloop; sys_platform != "win32"
+redis
+psycopg2-binary
+neo-api-client
+pyotp

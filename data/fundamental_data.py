@@ -6,7 +6,7 @@ import yfinance as yf
 
 from config import FUNDAMENTAL_CACHE_TTL
 from data.cache_utils import load_cache, save_cache
-from data.yfinance_utils import ensure_yfinance_cache
+from data.yfinance_utils import ensure_yfinance_cache, get_yfinance_session
 from utils.logger import logger
 
 
@@ -40,7 +40,7 @@ def get_fundamental_data(symbol: str) -> dict[str, Any]:
 
     try:
         ensure_yfinance_cache()
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol, session=get_yfinance_session())
         try:
             info = ticker.info or {}
         except Exception:

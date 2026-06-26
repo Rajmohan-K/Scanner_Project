@@ -14,6 +14,7 @@ export type LiveMonitorInput = {
   target_2?: number;
   telegram?: boolean;
   source?: string;
+  custom_price_alert?: number;
 };
 
 export type LiveMonitorRow = {
@@ -28,6 +29,7 @@ export type LiveMonitorRow = {
   last_updated?: string;
   telegram_status?: string;
   source?: string;
+  custom_price_alert?: number;
 };
 
 const MONITOR_KEY = 'dashboard-live-monitor';
@@ -55,6 +57,7 @@ export function rowFromStock(stock: LiveMonitorInput, source = 'scan'): LiveMoni
     target1: numberOrUndefined(stock.target1 ?? stock.target_1),
     target2: numberOrUndefined(stock.target2 ?? stock.target_2),
     telegram: stock.telegram ?? false,
+    custom_price_alert: numberOrUndefined(stock.custom_price_alert),
     last_updated: new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }),
     source,
   };
@@ -95,6 +98,7 @@ export function addStocksToLiveMonitor(stocks: LiveMonitorInput[], source = 'sca
         target1: row.target1 ?? existing.target1,
         target2: row.target2 ?? existing.target2,
         telegram: existing.telegram ?? row.telegram,
+        custom_price_alert: row.custom_price_alert ?? existing.custom_price_alert,
         telegram_status: '',
       });
       updated += 1;

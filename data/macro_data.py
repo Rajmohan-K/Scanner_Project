@@ -1,7 +1,7 @@
 from utils.logger import logger
 import pandas as pd
 import yfinance as yf
-from data.yfinance_utils import ensure_yfinance_cache
+from data.yfinance_utils import ensure_yfinance_cache, get_yfinance_session
 
 
 def _to_scalar(value):
@@ -37,7 +37,8 @@ def get_change_pct(symbol):
             symbol,
             period="5d",
             interval="1d",
-            progress=False
+            progress=False,
+            session=get_yfinance_session()
         )
 
         if len(df) < 2:

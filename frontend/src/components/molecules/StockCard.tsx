@@ -8,6 +8,12 @@ import { addStocksToLiveMonitor } from '@/lib/liveMonitor';
 export type StockRecord = {
   stock?: string;
   symbol?: string;
+  company_name?: string;
+  nse_symbol?: string;
+  bse_symbol?: string;
+  exchange?: string;
+  active_quote_source?: string;
+  fallback_reason?: string;
   sector?: string;
   industry?: string;
   live_price?: number;

@@ -123,7 +123,38 @@ export type StockSearchResult = {
   symbol: string;
   name: string;
   exchange: string;
+  nse_symbol?: string;
+  bse_symbol?: string;
 };
+
+export const localStockFallbacks: StockSearchResult[] = [
+  { symbol: 'RELIANCE.NS', name: 'Reliance Industries', exchange: 'NSE', nse_symbol: 'RELIANCE' },
+  { symbol: 'TCS.NS', name: 'Tata Consultancy Services', exchange: 'NSE', nse_symbol: 'TCS' },
+  { symbol: 'INFY.NS', name: 'Infosys', exchange: 'NSE', nse_symbol: 'INFY' },
+  { symbol: 'HDFCBANK.NS', name: 'HDFC Bank', exchange: 'NSE', nse_symbol: 'HDFCBANK' },
+  { symbol: 'ICICIBANK.NS', name: 'ICICI Bank', exchange: 'NSE', nse_symbol: 'ICICIBANK' },
+  { symbol: 'WIPRO.NS', name: 'Wipro', exchange: 'NSE', nse_symbol: 'WIPRO' },
+  { symbol: 'SBIN.NS', name: 'State Bank of India', exchange: 'NSE', nse_symbol: 'SBIN' },
+  { symbol: 'AXISBANK.NS', name: 'Axis Bank', exchange: 'NSE', nse_symbol: 'AXISBANK' },
+  { symbol: 'BAJFINANCE.NS', name: 'Bajaj Finance', exchange: 'NSE', nse_symbol: 'BAJFINANCE' },
+  { symbol: 'BHARTIARTL.NS', name: 'Bharti Airtel', exchange: 'NSE', nse_symbol: 'BHARTIARTL' },
+  { symbol: 'ITC.NS', name: 'ITC', exchange: 'NSE', nse_symbol: 'ITC' },
+  { symbol: 'LT.NS', name: 'Larsen & Toubro', exchange: 'NSE', nse_symbol: 'LT' },
+  { symbol: 'MARUTI.NS', name: 'Maruti Suzuki', exchange: 'NSE', nse_symbol: 'MARUTI' },
+  { symbol: 'TATAMOTORS.NS', name: 'Tata Motors', exchange: 'NSE', nse_symbol: 'TATAMOTORS' },
+  { symbol: 'OLAELEC.NS', name: 'Ola Electric Mobility', exchange: 'NSE', nse_symbol: 'OLAELEC' },
+  { symbol: 'AAVAS.NS', name: 'Aavas Financiers', exchange: 'NSE', nse_symbol: 'AAVAS' },
+  { symbol: 'ANANDRATHI.NS', name: 'Anand Rathi Wealth', exchange: 'NSE', nse_symbol: 'ANANDRATHI' },
+  { symbol: 'HAPPSTMNDS.NS', name: 'Happiest Minds Technologies', exchange: 'NSE', nse_symbol: 'HAPPSTMNDS' },
+];
+
+export function localStockSearch(query: string, limit = 8) {
+  const needle = query.trim().toLowerCase();
+  if (needle.length < 2) return [];
+  return localStockFallbacks
+    .filter((stock) => `${stock.symbol} ${stock.name} ${stock.nse_symbol || ''} ${stock.bse_symbol || ''}`.toLowerCase().includes(needle))
+    .slice(0, limit);
+}
 
 export type StockQuotePayload = {
   status: string;
@@ -296,8 +327,14 @@ export function getStockStreamUrl(symbol: string) {
 
 export type WatchlistSnapshot = {
   symbol?: string;
+  sector?: string;
+  isin?: string;
   company_name?: string;
   exchange?: string;
+  nse_symbol?: string;
+  bse_symbol?: string;
+  active_quote_source?: string;
+  fallback_reason?: string;
   current_price?: number;
   price_change_pct?: number;
   volume_spike?: number;
@@ -308,6 +345,18 @@ export type WatchlistSnapshot = {
   current_status?: string;
   intraday_signal?: string;
   swing_signal?: string;
+  suggested_at?: string;
+  suggested_entry_price?: number;
+  current_gain_loss_percent?: number;
+  max_gain_after_suggestion?: number;
+  max_loss_after_suggestion?: number;
+  time_since_suggestion?: string;
+  suggestion_status?: string;
+  quality_label?: string;
+  quality_score?: number;
+  expected_profit_percent?: number;
+  expected_loss_percent?: number;
+  risk_reward_ratio?: number;
   risk?: string;
   confidence?: number;
   last_alert?: string;
@@ -344,12 +393,30 @@ export type WatchlistSnapshot = {
   vwap?: number;
   ema20?: number;
   stale?: boolean;
+  direction?: string;
+  is_high_alert?: boolean;
+  distance_from_intraday_high_percent?: number;
+  custom_price_alert?: number;
+  dataFreshness?: string;
+  initialStopLoss?: number | null;
+  trailingStop?: number | null;
+  trailingActivated?: boolean;
+  highestPriceSinceEntry?: number | null;
+  lowestPriceSinceEntry?: number | null;
+  trailingStatus?: string;
+  targetHitStatus?: string;
+  stopLossHitStatus?: string;
+  outcome?: string;
 };
 
 export type WatchlistItem = {
   symbol: string;
   company_name?: string;
   exchange?: string;
+  nse_symbol?: string;
+  bse_symbol?: string;
+  active_quote_source?: string;
+  fallback_reason?: string;
   monitoring_enabled?: boolean;
   alerts_enabled?: boolean;
   telegram_enabled?: boolean;
@@ -362,6 +429,13 @@ export type WatchlistItem = {
   last_checked?: string;
   last_alert?: string;
   snapshot?: WatchlistSnapshot;
+  source?: string;
+  added_from?: string;
+  first_seen_at?: string;
+  last_updated_at?: string;
+  active_status?: string;
+  custom_price_alert?: number;
+  isin?: string;
 };
 
 export type AlertSettings = {
@@ -396,6 +470,17 @@ export type AlertSettings = {
   half_percent_move_threshold?: number;
   gtt_plan_enabled?: boolean;
   future_auto_trade_enabled?: boolean;
+  avoid_negative_alerts?: boolean;
+  min_profit_pct?: number;
+  groww_source_enabled?: boolean;
+  browser_alerts_enabled?: boolean;
+  volume_alerts_enabled?: boolean;
+  target_alerts_enabled?: boolean;
+  stop_loss_alerts_enabled?: boolean;
+  buy_alerts_enabled?: boolean;
+  sell_alerts_enabled?: boolean;
+  auto_add_candidates?: boolean;
+  price_surge_pct?: number;
 };
 
 export type AlertHistoryRecord = {
@@ -475,6 +560,16 @@ export async function getWatchlistHistory(params: Record<string, string | number
     if (value !== undefined && value !== '') query.set(key, String(value));
   });
   return liveGet<{ status: string; alerts: AlertHistoryRecord[] }>(`/api/watchlist/history${query.toString() ? `?${query}` : ''}`);
+}
+
+export async function getSignals() {
+  return liveGet<{ status: string; active: any[]; history: any[] }>('/api/signals');
+}
+
+export async function closeSignal(symbol: string) {
+  const response = await client.post(`/api/watchlist/signals/${encodeURIComponent(symbol)}/close`, {});
+  clearApiCache();
+  return response.data as { status: string; message: string };
 }
 
 export type WatchlistAuditRecord = {
@@ -868,6 +963,11 @@ export async function getV20Stocks(params: Record<string, string | number | bool
 
 export async function getV20Quote(symbol: string) {
   return liveGet(`/api/v20/quote/${encodeURIComponent(symbol)}`);
+}
+
+export async function getV20Quotes(symbols: string[]) {
+  if (!symbols.length) return { quotes: {} };
+  return liveGet(`/api/v20/quotes?symbols=${encodeURIComponent(symbols.join(','))}`);
 }
 
 export async function getQuickIntradaySignal(symbol: string, interval = '5m') {

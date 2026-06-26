@@ -12,7 +12,9 @@ import { useToast } from '@/components/layout/ToastProvider';
 import { addStocksToLiveMonitor } from '@/lib/liveMonitor';
 import GrowwPriorityPanel from '@/components/organisms/GrowwPriorityPanel';
 import { addPriorityCandidates, buildPriorityRows } from '@/lib/priorityPicks';
-import { hydrateRowsWithUnifiedAnalysis } from '@/lib/unifiedAnalysis';
+import { hydrateRowsWithBatchQuotes, hydrateRowsWithUnifiedAnalysis } from '@/lib/unifiedAnalysis';
+import { useRealtime } from '@/hooks/useRealtime';
+import { playWatchlistAlertTone } from '@/lib/watchlistAlerts';
 
 export default function SwingPage() {
   const dispatch = useDispatch();
@@ -30,6 +32,16 @@ export default function SwingPage() {
   const [monitorInput, setMonitorInput] = useState('');
   const [telegramAlerts, setTelegramAlerts] = useState(false);
   const [selectedScanRows, setSelectedScanRows] = useState<any[]>([]);
+  const [pushed, setPushed] = useState<any[]>([]);
+  
+  useRealtime((msg) => {
+    if (msg?.type === 'push-to-swing') {
+      setPushed((prev) => [...(msg.payload || []), ...prev]);
+      toast?.push('New swing candidate received', 'success');
+      playWatchlistAlertTone('high', 'BUY');
+    }
+  });
+
   const alertedSymbols = React.useRef<Set<string>>(new Set());
   const priorityPushedSymbolsRef = React.useRef<Set<string>>(new Set());
   const topStocksRef = React.useRef<any[]>([]);
@@ -75,11 +87,13 @@ export default function SwingPage() {
   }, [customSymbols]);
 
   React.useEffect(() => {
+    let active = true;
     async function loadLatest() {
       if (latestLoadInFlightRef.current) return;
       latestLoadInFlightRef.current = true;
       try {
         const data = await getLatestScanWithResults({ scanMode: /swing|v20-dashboard/i, actionableOnly: false, source: 'best', horizon: 'swing' });
+        if (!active) return;
         const rows = await hydrateRowsWithUnifiedAnalysis(data.rows || [], 'swing', 40);
         dispatch(setTopStocks(rows));
       } catch {
@@ -89,7 +103,28 @@ export default function SwingPage() {
       }
     }
     loadLatest();
-    const timer = window.setInterval(loadLatest, 3000);
+    const timer = window.setInterval(loadLatest, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [dispatch]);
+
+  React.useEffect(() => {
+    async function updateQuotes() {
+      const current = topStocksRef.current;
+      if (!current.length || visibleQuotesRefreshingRef.current) return;
+      visibleQuotesRefreshingRef.current = true;
+      try {
+        const updated = await hydrateRowsWithBatchQuotes(current);
+        dispatch(setTopStocks(updated));
+      } catch (err) {
+        console.error("Failed to update swing quotes:", err);
+      } finally {
+        visibleQuotesRefreshingRef.current = false;
+      }
+    }
+    const timer = window.setInterval(updateQuotes, 1000);
     return () => window.clearInterval(timer);
   }, [dispatch]);
   React.useEffect(() => {
@@ -113,7 +148,18 @@ export default function SwingPage() {
     const timer = window.setInterval(loadActiveScans, 2500);
     return () => window.clearInterval(timer);
   }, []);
-  const source = topStocks;
+  const source = useMemo(() => {
+    if (!pushed.length) return topStocks;
+    const combined = [...pushed, ...topStocks];
+    const seen = new Set();
+    return combined.filter((item) => {
+      const sym = item.symbol || item.stock;
+      if (!sym) return false;
+      if (seen.has(sym)) return false;
+      seen.add(sym);
+      return true;
+    });
+  }, [pushed, topStocks]);
   const swingItems = useMemo(() => source.filter((item: any) => `${item.symbol} ${item.stock} ${item.sector}`.toLowerCase().includes(query.toLowerCase())), [source, query]);
   const visibleSwingItems = useMemo(() => swingItems.slice(0, displayLimit), [swingItems, displayLimit]);
   const selectedScannerRows = useMemo(() => {
@@ -136,38 +182,7 @@ export default function SwingPage() {
   React.useEffect(() => {
     topStocksRef.current = topStocks;
   }, [topStocks]);
-  React.useEffect(() => {
-    if (!visibleQuoteSymbols.length) return;
-    async function refreshVisibleQuotes() {
-      if (visibleQuotesRefreshingRef.current) return;
-      visibleQuotesRefreshingRef.current = true;
-      try {
-        const quotes = await Promise.all(visibleQuoteSymbols.map(async (symbol) => {
-          try {
-            const payload = await getV20Quote(symbol);
-            const quote = payload?.quote || {};
-            const live = Number(quote.current_price ?? quote.regularMarketPrice ?? quote.price ?? 0);
-            const previous = Number(quote.previous_close || 0);
-            return { symbol, live: Number.isFinite(live) && live > 0 ? Math.round(live * 100) / 100 : undefined, change: previous && live ? Math.round(((live - previous) / previous) * 10000) / 100 : undefined };
-          } catch {
-            return { symbol };
-          }
-        }));
-        const bySymbol = new Map(quotes.filter((item) => item.live !== undefined).map((item) => [item.symbol, item]));
-        if (!bySymbol.size) return;
-        dispatch(setTopStocks(topStocksRef.current.map((stock: any) => {
-          const symbol = stock.symbol || stock.stock;
-          const item = bySymbol.get(symbol);
-          return item ? { ...stock, live_price: item.live, current_price: item.live, change_pct: item.change ?? stock.change_pct, last_updated: new Date().toISOString() } : stock;
-        })));
-      } finally {
-        visibleQuotesRefreshingRef.current = false;
-      }
-    }
-    refreshVisibleQuotes();
-    const timer = window.setInterval(refreshVisibleQuotes, 1000);
-    return () => window.clearInterval(timer);
-  }, [dispatch, visibleQuoteSymbolsKey]);
+
   React.useEffect(() => {
     if (selectedMonitor.length || !source.length) return;
     try {

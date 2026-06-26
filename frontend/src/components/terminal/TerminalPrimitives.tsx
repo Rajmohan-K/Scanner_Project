@@ -163,6 +163,42 @@ export function DataTable({
   emptyBody?: string;
 }) {
   const visibleRows = useMemo(() => rows || [], [rows]);
+
+  const getRowBackground = (row: React.ReactNode[]) => {
+    const checkText = (node: any): string | null => {
+      if (!node) return null;
+      if (typeof node === 'string' || typeof node === 'number') {
+        return String(node).toUpperCase();
+      }
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          const res = checkText(item);
+          if (res) return res;
+        }
+      }
+      if (node.props) {
+        if (node.props.children) {
+          const res = checkText(node.props.children);
+          if (res) return res;
+        }
+      }
+      return null;
+    };
+
+    for (const cell of row) {
+      const text = checkText(cell);
+      if (text) {
+        if (text === 'BUY' || text === 'TARGET HIT' || text.includes('BUY READY')) {
+          return 'rgba(20, 184, 166, 0.05)';
+        }
+        if (text === 'SELL' || text === 'STOPLOSS HIT' || text.includes('SELL READY')) {
+          return 'rgba(244, 63, 94, 0.05)';
+        }
+      }
+    }
+    return undefined;
+  };
+
   return (
     <div className="table-wrap">
       {visibleRows.length ? (
@@ -171,11 +207,14 @@ export function DataTable({
             <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
           </thead>
           <tbody>
-            {visibleRows.map((row, rowIndex) => (
-              <tr key={rowIndex}>
-                {row.map((cell, cellIndex) => <td key={cellIndex} data-label={columns[cellIndex]}>{cell}</td>)}
-              </tr>
-            ))}
+            {visibleRows.map((row, rowIndex) => {
+              const bg = getRowBackground(row);
+              return (
+                <tr key={rowIndex} style={bg ? { background: bg } : undefined}>
+                  {row.map((cell, cellIndex) => <td key={cellIndex} data-label={columns[cellIndex]}>{cell}</td>)}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       ) : (

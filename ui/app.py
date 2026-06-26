@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*timedelta.*")
+warnings.filterwarnings("ignore", module="yfinance")
+
 import argparse
 import asyncio
 import csv
@@ -21,7 +26,7 @@ if sys.platform.startswith("win"):
     except (AttributeError, RuntimeError):
         pass
 
-from aiohttp import ClientConnectionResetError, web
+from aiohttp import ClientConnectionResetError, WSMsgType, web
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +54,7 @@ from ui.storage import (
     stock_history,
 )  # noqa: E402
 from ui import ai_intelligence, v20_store, v30_store  # noqa: E402
+from ui.live_state import database_writer, live_connection_registry, stock_snapshot_cache  # noqa: E402
 from ui.stock_data_service import encode_sse, normalize_stock_symbol, stock_data_service  # noqa: E402
 from ui.watchlist_monitor import watchlist_monitor  # noqa: E402
 from data.market_data_provider import get_market_data_provider  # noqa: E402
@@ -785,16 +791,229 @@ def _db_first_load_scan(scan_id: str) -> dict[str, Any] | None:
 
 
 async def health(_: web.Request) -> web.Response:
-    saved_scans = _db_first_list_scans(limit=1)
-    latest_scan = saved_scans[0] if saved_scans else None
+    from ui.pg_store import get_pg_pool
+    from ui.redis_cache import get_redis_client, MockRedis
+    from ui.realtime_feed import realtime_feed_simulator
+    
+    pg_status = "ok"
+    pg_pool = get_pg_pool()
+    if pg_pool == "MOCK":
+        pg_status = "mock"
+        
+    redis_status = "ok"
+    redis_client = get_redis_client()
+    if isinstance(redis_client, MockRedis):
+        redis_status = "mock"
+        
+    try:
+        saved_scans = _db_first_list_scans(limit=1)
+        latest_scan = saved_scans[0] if saved_scans else None
+        feed_status = "scan data available" if latest_scan else "no saved scans"
+        scan_count = len(saved_scans)
+    except Exception:
+        latest_scan = None
+        feed_status = "offline"
+        scan_count = 0
+        
+    cache_age = None
+    if stock_snapshot_cache.last_updated:
+        cache_age = round(datetime.now().timestamp() - stock_snapshot_cache.last_updated, 2)
+    live_status = "Connected"
+    if realtime_feed_simulator.status == "Failed":
+        live_status = "Stale Data" if stock_snapshot_cache.all() else "Backend Down"
+    elif cache_age is not None and cache_age > 15:
+        live_status = "Stale Data"
+
     return web.json_response({
         "status": "ok",
         "system_status": "ok",
         "api_status": "online",
-        "data_feed_status": "scan data available" if latest_scan else "no saved scans",
-        "scan_count": len(saved_scans),
+        "database": pg_status,
+        "cache": redis_status,
+        "live_status": live_status,
+        "live_cache_count": len(stock_snapshot_cache.all()),
+        "live_cache_age_seconds": cache_age,
+        "failed_symbols_count": len(stock_snapshot_cache.failed_symbols),
+        "last_error": database_writer.last_error or realtime_feed_simulator.error_reason,
+        "data_feed_status": feed_status,
+        "scan_count": scan_count,
         "latest_scan": latest_scan,
+        "timestamp": datetime.now().isoformat()
     }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def provider_status(_: web.Request) -> web.Response:
+    from data.market_data_provider import get_market_data_provider
+    provider = get_market_data_provider()
+    authenticated = getattr(provider, "authenticated", None)
+    provider_name = "kotak" if authenticated is not None else "yfinance"
+    connected = bool(authenticated) if authenticated is not None else True
+    
+    return web.json_response({
+        "provider": provider_name,
+        "connected": connected,
+        "status": "Connected"
+    }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def market_snapshot(_: web.Request) -> web.Response:
+    snapshots = stock_snapshot_cache.all()
+    if not snapshots:
+        from ui.redis_cache import LiveSnapshotCache
+        snapshots = LiveSnapshotCache.get_all_snapshots()
+    return web.json_response({
+        "status": "ok",
+        "count": len(snapshots),
+        "snapshot": snapshots
+    }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def market_missing(_: web.Request) -> web.Response:
+    from ui.redis_cache import get_redis_client, MockRedis
+    client = get_redis_client()
+    if isinstance(client, MockRedis):
+        missing = list(client._lists.get("missing_symbol_queue", []))
+    else:
+        missing = client.lrange("missing_symbol_queue", 0, -1)
+    return web.json_response({
+        "missing_symbols": missing,
+        "count": len(missing)
+    }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def scan_live(_: web.Request) -> web.Response:
+    from ui.stock_registry import stock_registry
+    active = stock_registry.active_suggestions
+    return web.json_response({
+        "status": "ok",
+        "active_signals": active
+    }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def signals_active(_: web.Request) -> web.Response:
+    from ui.stock_registry import stock_registry
+    active = stock_registry.active_suggestions
+    return web.json_response(list(active.values()), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def signals_history(_: web.Request) -> web.Response:
+    from ui.stock_registry import stock_registry
+    return web.json_response(stock_registry.suggestion_history, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def debug_data_flow(_: web.Request) -> web.Response:
+    from ui.redis_cache import get_redis_client, MockRedis
+    client = get_redis_client()
+    redis_type = "MockRedis" if isinstance(client, MockRedis) else "Redis"
+    
+    from ui.pg_store import get_pg_pool
+    pg_pool = get_pg_pool()
+    pg_type = "MockConnection" if pg_pool == "MOCK" else "PostgresPool"
+    
+    return web.json_response({
+        "redis": redis_type,
+        "postgres": pg_type,
+        "timestamp": datetime.now().isoformat()
+    }, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def debug_missing_stocks(_: web.Request) -> web.Response:
+    from ui.pg_store import rows
+    db_missing = rows("SELECT * FROM missing_symbol_log ORDER BY updated_at DESC LIMIT 50")
+    return web.json_response(db_missing, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def market_stream(request: web.Request) -> web.StreamResponse:
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await response.prepare(request)
+    queue = await live_connection_registry.register()
+    heartbeat_task = asyncio.create_task(live_connection_registry.heartbeat_loop(queue), name="sse-heartbeat")
+    try:
+        initial = {"type": "snapshot", "snapshot": stock_snapshot_cache.all(), "updated_at": datetime.now().isoformat(timespec="seconds")}
+        await response.write(f"event: snapshot\ndata: {json.dumps(initial, default=str)}\n\n".encode("utf-8"))
+        while True:
+            if request.transport is None or request.transport.is_closing():
+                break
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=6.0)
+                event_name = str(payload.get("type") or "message")
+                await response.write(f"event: {event_name}\ndata: {json.dumps(payload, default=str)}\n\n".encode("utf-8"))
+            except asyncio.TimeoutError:
+                heartbeat = {"type": "heartbeat", "updated_at": datetime.now().isoformat(timespec="seconds")}
+                await response.write(f"event: heartbeat\ndata: {json.dumps(heartbeat, default=str)}\n\n".encode("utf-8"))
+            except (ClientConnectionResetError, ConnectionResetError):
+                break
+    finally:
+        heartbeat_task.cancel()
+        await live_connection_registry.unregister(queue)
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+    return response
+
+
+async def websocket_live(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse(heartbeat=5.0, compress=False)
+    await ws.prepare(request)
+    queue = await live_connection_registry.register()
+    sender_task: asyncio.Task | None = None
+
+    async def safe_send_json(payload: dict[str, Any]) -> bool:
+        if ws.closed:
+            return False
+        try:
+            await ws.send_json(payload)
+            return True
+        except (asyncio.CancelledError, ClientConnectionResetError, ConnectionResetError, RuntimeError, BrokenPipeError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            logger.debug(f"Live websocket client disconnected during send: {exc}")
+            return False
+
+    async def sender() -> None:
+        if not await safe_send_json({"type": "snapshot", "snapshot": stock_snapshot_cache.all(), "updated_at": datetime.now().isoformat(timespec="seconds")}):
+            return
+        while not ws.closed:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                payload = {"type": "heartbeat", "updated_at": datetime.now().isoformat(timespec="seconds")}
+            if not await safe_send_json(payload):
+                return
+
+    sender_task = asyncio.create_task(sender(), name="websocket-live-sender")
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.ERROR:
+                logger.debug(f"Live websocket closed with error: {ws.exception()}")
+                break
+            if msg.type == WSMsgType.TEXT:
+                try:
+                    payload = json.loads(msg.data)
+                except Exception:
+                    payload = {}
+                if payload.get("type") == "ping":
+                    if not await safe_send_json({"type": "heartbeat", "updated_at": datetime.now().isoformat(timespec="seconds")}):
+                        break
+    finally:
+        if sender_task:
+            sender_task.cancel()
+            try:
+                await sender_task
+            except asyncio.CancelledError:
+                pass
+        await live_connection_registry.unregister(queue)
+    return ws
 
 
 def _latest_close(symbol: str) -> float | None:
@@ -1920,7 +2139,7 @@ async def _cached_realtime_payload(max_age_seconds: float = 2.0) -> dict[str, An
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "message": f"Realtime snapshot temporarily unavailable; waiting for first successful cache refresh: {exc!r}",
             "freshness": {"updated_at": "", "age_seconds": None, "stale": True},
-            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "sqlite+memory"},
+            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "memory"},
             "indices": [],
             "buckets": {},
             "ai_insights": [],
@@ -1940,7 +2159,7 @@ async def realtime_snapshot(_: web.Request) -> web.Response:
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "message": "Realtime snapshot temporarily unavailable; serving explicit stale state.",
             "freshness": {"updated_at": "", "age_seconds": None, "stale": True},
-            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "sqlite"},
+            "connection": {"stream": "polling", "websocket": False, "redis": False, "hot_cache": "memory"},
             "buckets": {},
             "events": [],
         }
@@ -2047,7 +2266,7 @@ async def dashboard_live(_: web.Request) -> web.Response:
             {
                 "status": "error",
                 "data_status": "unavailable",
-                "message": "Live dashboard data is unavailable. Check backend data provider and SQLite availability.",
+                "message": "Live dashboard data is unavailable. Check backend data provider and Redis cache.",
                 "error": str(exc),
                 "generated_at": datetime.now().isoformat(timespec="seconds"),
             },
@@ -2190,7 +2409,7 @@ async def stock_stream(request: web.Request) -> web.StreamResponse:
                 await response.write(await encode_sse("ANALYSIS_UPDATED", analysis))
                 last_analysis_signature = analysis_signature
             await response.write(await encode_sse("HEARTBEAT", {"symbol": symbol, "updated_at": datetime.now().isoformat(timespec="seconds")}))
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
     except (asyncio.CancelledError, ClientConnectionResetError, ConnectionResetError):
         logger.debug(f"Stock stream client disconnected for {symbol}")
     except Exception as exc:
@@ -2258,6 +2477,15 @@ async def watchlist_item_update(request: web.Request) -> web.Response:
     item = await watchlist_monitor.update_item(normalized, payload)
     return web.json_response({"status": "ok", "item": item}, dumps=lambda value: json.dumps(value, default=str))
 
+async def close_watchlist_signal(request: web.Request) -> web.Response:
+    symbol = request.match_info.get("symbol") or ""
+    normalized = normalize_stock_symbol(symbol)
+    if not normalized:
+        raise web.HTTPBadRequest(text="valid symbol required")
+    from ui.stock_registry import stock_registry
+    await stock_registry.clear_suggestion(normalized)
+    return web.json_response({"status": "ok", "message": f"Signal for {normalized} closed successfully"})
+
 
 async def watchlist_status(_: web.Request) -> web.Response:
     return web.json_response(
@@ -2296,7 +2524,7 @@ async def watchlist_stream(request: web.Request) -> web.StreamResponse:
                 await response.write(await encode_sse("WATCHLIST_UPDATED", payload))
                 last_signature = signature
             await response.write(await encode_sse("HEARTBEAT", {"updated_at": datetime.now().isoformat(timespec="seconds")}))
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
     except (asyncio.CancelledError, ClientConnectionResetError, ConnectionResetError):
         logger.debug("Watchlist stream client disconnected")
     except Exception as exc:
@@ -2782,7 +3010,31 @@ async def v30_backfill_worker(app: web.Application):
 
 
 async def stock_data_worker(app: web.Application):
-    await stock_data_service.start()
+    try:
+        from ui.stock_registry import stock_registry
+        asyncio.create_task(asyncio.to_thread(stock_registry.ensure_symbol_universe_in_db), name="symbol-universe-db-seed")
+        await asyncio.to_thread(stock_registry.load_registry_cache)
+        for row in await asyncio.to_thread(
+            v20_store.rows,
+            "SELECT symbol, price, previous_close, change_pct, volume, provider, updated_at FROM live_quotes ORDER BY updated_at DESC LIMIT 500",
+        ):
+            await stock_snapshot_cache.update(
+                str(row.get("symbol") or ""),
+                {
+                    "current_price": row.get("price"),
+                    "previous_close": row.get("previous_close"),
+                    "change_pct": row.get("change_pct"),
+                    "volume": row.get("volume"),
+                    "provider": row.get("provider"),
+                    "updated_at": row.get("updated_at"),
+                },
+                source=row.get("provider") or "database-warm-cache",
+                status="stale",
+            )
+    except Exception as exc:
+        logger.warning(f"Live startup warm cache skipped: {exc}")
+    if str(os.getenv("STOCK_DATA_AUTOSTART", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        await stock_data_service.start()
     try:
         yield
     finally:
@@ -2790,7 +3042,8 @@ async def stock_data_worker(app: web.Application):
 
 
 async def watchlist_monitor_worker(app: web.Application):
-    await watchlist_monitor.start()
+    if str(os.getenv("WATCHLIST_AUTOSTART", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        await watchlist_monitor.start()
     try:
         yield
     finally:
@@ -2819,7 +3072,22 @@ def create_app() -> web.Application:
     # Serve static assets (CSS, JS, images) from ui/static/
     app.router.add_static('/static/', path=str(BASE_DIR / 'static'), show_index=False)
     app.router.add_get("/", index)
+    app.router.add_get("/health", health)
     app.router.add_get("/api/health", health)
+    app.router.add_get("/api/provider/status", provider_status)
+    app.router.add_get("/api/market/snapshot", market_snapshot)
+    app.router.add_get("/api/market/missing", market_missing)
+    app.router.add_get("/api/scan/live", scan_live)
+    app.router.add_get("/api/signals/active", signals_active)
+    app.router.add_get("/api/signals/history", signals_history)
+    app.router.add_get("/api/debug/data-flow", debug_data_flow)
+    app.router.add_get("/api/debug/missing-stocks", debug_missing_stocks)
+    app.router.add_get("/api/market/stream", market_stream)
+    app.router.add_get("/events", market_stream)
+    app.router.add_get("/api/events", market_stream)
+    app.router.add_get("/live", websocket_live)
+    app.router.add_get("/api/live", websocket_live)
+    app.router.add_get("/api/ws", websocket_live)
     app.router.add_get("/api/market/widgets", market_widgets)
     app.router.add_get("/api/dashboard/live", dashboard_live)
     app.router.add_get("/api/stream", v30_stream)
@@ -2844,6 +3112,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/watchlist/audit", get_watchlist_audit)
     app.router.add_delete("/api/watchlist/audit", clear_watchlist_audit)
     app.router.add_get("/api/watchlist/stream", watchlist_stream)
+    app.router.add_post("/api/watchlist/signals/{symbol}/close", close_watchlist_signal)
     app.router.add_get("/api/alerts", alert_history_api)
     app.router.add_post("/api/alerts/test", alert_test_api)
     app.router.add_get("/api/alerts/settings", alert_settings_api)

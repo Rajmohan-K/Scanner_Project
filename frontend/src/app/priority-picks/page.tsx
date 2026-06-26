@@ -270,27 +270,146 @@ export default function PriorityPicksPage() {
       ]);
       const intradayRows = intradayResult.status === 'fulfilled' ? intradayResult.value : [];
       const swingRows = swingResult.status === 'fulfilled' ? swingResult.value : [];
-      const unifiedIntraday = await hydrateRowsWithUnifiedAnalysis([...(groww.priorityRows || []), ...(groww.rows || []), ...intradayRows, ...externalIntraday], 'intraday', 200);
-      const unifiedSwing = await hydrateRowsWithUnifiedAnalysis([...swingRows, ...externalSwing], 'swing', 200);
-      const intradayPriority = buildPriorityRows(unifiedIntraday, {
+
+      const currentActive = activeRowsRef.current;
+      const activeIntraday = currentActive.filter((r) => r.horizon === 'intraday');
+      const activeSwing = currentActive.filter((r) => r.horizon === 'swing');
+
+      const unifiedIntraday = await hydrateRowsWithUnifiedAnalysis([
+        ...activeIntraday,
+        ...(groww.priorityRows || []),
+        ...(groww.rows || []),
+        ...intradayRows,
+        ...externalIntraday,
+      ], 'intraday', 200);
+
+      const unifiedSwing = await hydrateRowsWithUnifiedAnalysis([
+        ...activeSwing,
+        ...swingRows,
+        ...externalSwing,
+      ], 'swing', 200);
+
+      const updatedActiveIntraday = unifiedIntraday.filter((row) =>
+        activeIntraday.some((act) => act.key === row.key || (act.symbol === row.symbol && act.horizon === 'intraday'))
+      );
+      const updatedActiveSwing = unifiedSwing.filter((row) =>
+        activeSwing.some((act) => act.key === row.key || (act.symbol === row.symbol && act.horizon === 'swing'))
+      );
+
+      const now = Date.now();
+      const recentClosed = new Map(
+        historyRowsRef.current
+          .filter((row) => now - new Date(row.closed_at).getTime() < 30 * 60 * 1000)
+          .map((row) => [row.key, row]),
+      );
+
+      const scanOnlyIntraday = unifiedIntraday.filter((row) =>
+        !activeIntraday.some((act) => act.symbol === row.symbol)
+      );
+      const scanOnlySwing = unifiedSwing.filter((row) =>
+        !activeSwing.some((act) => act.symbol === row.symbol)
+      );
+
+      const intradayPriority = buildPriorityRows(scanOnlyIntraday, {
         horizon: 'intraday',
         includeUnknown: true,
         minProfitPct: settingsRef.current.minProfitPct,
         limit: settingsRef.current.limit,
         sourceName: 'Intraday Sources',
       }).map((row) => normalizeTrackedRow(row, 'intraday'));
-      const swingPriority = buildPriorityRows(unifiedSwing, {
+
+      const swingPriority = buildPriorityRows(scanOnlySwing, {
         horizon: 'swing',
         includeUnknown: true,
         minProfitPct: settingsRef.current.minProfitPct,
         limit: settingsRef.current.limit,
         sourceName: 'Swing Sources',
       }).map((row) => normalizeTrackedRow(row, 'swing'));
+
       const qualified = [...intradayPriority, ...swingPriority];
-      const refreshedKeys = new Set([...unifiedIntraday.map((row: any) => rowKey(row, 'intraday')), ...unifiedSwing.map((row: any) => rowKey(row, 'swing'))]);
-      const qualifiedKeys = new Set(qualified.map((row) => row.key));
-      setActiveRows((current) => current.filter((row) => !refreshedKeys.has(row.key) || qualifiedKeys.has(row.key)));
-      upsertPriorityRows(qualified);
+
+      setActiveRows((current) => {
+        const byKey = new Map(current.map((row) => [row.key, row]));
+
+        // Apply updated quotes to existing active rows
+        [...updatedActiveIntraday, ...updatedActiveSwing].forEach((row) => {
+          const key = row.key || rowKey(row, row.horizon);
+          const existing = byKey.get(key);
+          if (existing) {
+            byKey.set(key, {
+              ...existing,
+              ...row,
+              last_price: row.live_price ?? row.current_price ?? existing.last_price,
+              last_checked: nowIso(),
+            });
+          }
+        });
+
+        // Remove any keys that are no longer qualified if they were part of scanOnly
+        const scanOnlyIntradayKeys = new Set(scanOnlyIntraday.map((row: any) => rowKey(row, 'intraday')));
+        const scanOnlySwingKeys = new Set(scanOnlySwing.map((row: any) => rowKey(row, 'swing')));
+        const qualifiedKeys = new Set(qualified.map((row) => row.key));
+
+        byKey.forEach((row, key) => {
+          const isScanOnly = scanOnlyIntradayKeys.has(key) || scanOnlySwingKeys.has(key);
+          if (isScanOnly && !qualifiedKeys.has(key)) {
+            byKey.delete(key);
+          }
+        });
+
+        // Upsert newly qualified rows
+        const foundRows: TrackedPriorityRow[] = [];
+        qualified.forEach((row) => {
+          if (recentClosed.has(row.key)) return;
+          const existing = byKey.get(row.key);
+          if (existing) {
+            byKey.set(row.key, {
+              ...existing,
+              ...row,
+              found_at: existing.found_at,
+              suggested_entry_time: existing.suggested_entry_time || row.suggested_entry_time,
+              status: 'active',
+            });
+          } else {
+            byKey.set(row.key, row);
+            foundRows.push(row);
+          }
+        });
+
+        if (foundRows.length) {
+          foundRows.forEach((row) => maybeSendTelegram(row, 'found', `Priority stock found: ${row.symbol}`));
+          setTimeout(() => toast?.push(`${foundRows.length} new priority pick(s) added`, 'success'), 0);
+        }
+
+        // Check target/stoploss outcomes for all active rows
+        const closedRows: PriorityHistoryRow[] = [];
+        const activeList: TrackedPriorityRow[] = [];
+
+        byKey.forEach((row) => {
+          const livePrice = Number(row.last_price ?? row.live_price ?? row.current_price ?? 0);
+          if (livePrice > 0) {
+            const outcome = outcomeForPrice(row, livePrice);
+            if (outcome) {
+              closedRows.push({
+                ...row,
+                status: outcome.status,
+                closed_at: nowIso(),
+                close_price: livePrice,
+                close_reason: outcome.reason,
+              });
+              return;
+            }
+          }
+          activeList.push(row);
+        });
+
+        if (closedRows.length) {
+          setTimeout(() => archiveRows(closedRows), 0);
+        }
+
+        return activeList.sort((a, b) => Number(b.priority_profit_pct || 0) - Number(a.priority_profit_pct || 0));
+      });
+
       setSourceMessage(`${intradayPriority.length} intraday and ${swingPriority.length} swing priority picks qualified from latest scan sources.`);
     } catch (error: any) {
       setSourceMessage(error?.message || 'Unable to refresh priority sources');
@@ -301,7 +420,7 @@ export default function PriorityPicksPage() {
 
   useEffect(() => {
     loadPrioritySources();
-    const timer = window.setInterval(loadPrioritySources, 3000);
+    const timer = window.setInterval(loadPrioritySources, 1000);
     window.addEventListener(PRIORITY_CANDIDATES_EVENT, loadPrioritySources);
     return () => {
       window.clearInterval(timer);
@@ -317,57 +436,6 @@ export default function PriorityPicksPage() {
     });
     setHistoryRows((current) => [...rows, ...current].slice(0, 500));
   }
-
-  async function refreshQuotes() {
-    const rows = activeRowsRef.current;
-    if (!rows.length || quoteRefreshingRef.current) return;
-    quoteRefreshingRef.current = true;
-    try {
-      type QuoteUpdate = { key: string; livePrice?: number; checkedAt: string };
-      const quoteRows = await Promise.allSettled(rows.map(async (row): Promise<QuoteUpdate> => {
-        const payload = await getV20Quote(row.symbol);
-        const quote = payload?.quote || {};
-        const live = Number(quote.current_price ?? quote.regularMarketPrice ?? quote.price ?? quote.last_close ?? row.last_price ?? 0);
-        return {
-          key: row.key,
-          livePrice: Number.isFinite(live) && live > 0 ? Math.round(live * 100) / 100 : undefined,
-          checkedAt: nowIso(),
-        };
-      }));
-      const fulfilledQuoteRows = quoteRows.filter((item): item is PromiseFulfilledResult<QuoteUpdate> => item.status === 'fulfilled');
-      const updates = new Map(fulfilledQuoteRows.map((item) => [item.value.key, item.value]));
-      const closedRows: PriorityHistoryRow[] = [];
-      setActiveRows((current) => {
-        const next = current.map((row) => {
-          const update = updates.get(row.key);
-          if (!update?.livePrice) return row;
-          const enriched = { ...row, last_price: update.livePrice, live_price: update.livePrice, last_checked: update.checkedAt };
-          const outcome = outcomeForPrice(enriched, update.livePrice);
-          if (!outcome) return enriched;
-          closedRows.push({
-            ...enriched,
-            status: outcome.status,
-            closed_at: update.checkedAt,
-            close_price: update.livePrice,
-            close_reason: outcome.reason,
-          });
-          return enriched;
-        });
-        const closedKeys = new Set(closedRows.map((row) => row.key));
-        return next.filter((row) => !closedKeys.has(row.key));
-      });
-      if (closedRows.length) archiveRows(closedRows);
-    } finally {
-      quoteRefreshingRef.current = false;
-    }
-  }
-
-  useEffect(() => {
-    if (!activeRows.length) return;
-    refreshQuotes();
-    const timer = window.setInterval(refreshQuotes, 1000);
-    return () => window.clearInterval(timer);
-  }, [activeRows.length]);
 
   function removeActiveRow(row: TrackedPriorityRow) {
     const closed: PriorityHistoryRow = {

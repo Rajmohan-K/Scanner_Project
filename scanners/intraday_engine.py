@@ -74,47 +74,6 @@ def _normalize_frame(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return df.copy()
 
 
-def _ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, pd.NA)
-    return 100 - (100 / (1 + rs))
-
-
-def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    previous_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low).abs(), (high - previous_close).abs(), (low - previous_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    atr = _atr(high, low, close, period).replace(0, pd.NA)
-    plus_di = 100 * plus_dm.rolling(period).mean() / atr
-    minus_di = 100 * minus_dm.rolling(period).mean() / atr
-    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA)) * 100
-    return dx.rolling(period).mean()
-
-
-def _supertrend_line(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 10, multiplier: float = 3.0) -> pd.Series:
-    atr = _atr(high, low, close, period).fillna((high - low).rolling(period).mean())
-    hl2 = (high + low) / 2
-    upper = hl2 + multiplier * atr
-    lower = hl2 - multiplier * atr
-    return lower.where(close >= _ema(close, period), upper)
-
-
 def _fetch_quote(symbol: str) -> tuple[dict[str, Any], bool]:
     key = symbol.upper()
     cached = _fresh(_QUOTE_CACHE, key, V30_QUOTE_CACHE_SECONDS)
@@ -142,144 +101,64 @@ def quick_intraday_signal(symbol: str, interval: str = "5m") -> dict[str, Any]:
     started = time.perf_counter()
     quote, quote_cached = _fetch_quote(symbol)
     df, candles_cached = _fetch_candles(symbol, interval)
-    recent = df.tail(120).copy()
-    close = recent["Close"].astype(float)
-    high = recent["High"].astype(float)
-    low = recent["Low"].astype(float)
-    open_ = recent["Open"].astype(float) if "Open" in recent else close
-    volume = recent["Volume"].astype(float) if "Volume" in recent else close * 0
-
-    ema9 = _ema(close, 9)
-    ema20 = _ema(close, 20)
-    ema12 = _ema(close, 12)
-    ema26 = _ema(close, 26)
-    macd = ema12 - ema26
-    macd_signal = _ema(macd, 9)
-    rsi = _rsi(close, 14)
-    atr = _atr(high, low, close, 14)
-    adx = _adx(high, low, close, 14)
-    supertrend = _supertrend_line(high, low, close)
-
-    typical = (high + low + close) / 3
-    volume_sum = float(volume.tail(60).sum() or 0)
-    vwap = float((typical.tail(60) * volume.tail(60)).sum() / volume_sum) if volume_sum else float(close.tail(20).mean())
-    avg_volume = float(volume.tail(30).mean() or 0)
-    current_volume = float(volume.iloc[-1] or 0)
-    relative_volume = current_volume / avg_volume if avg_volume else 1.0
-    ltp = _round(quote.get("current_price") or quote.get("regularMarketPrice") or close.iloc[-1])
-    previous_close = _round(quote.get("previous_close") or (close.iloc[-2] if len(close) > 1 else close.iloc[-1]))
-    day_change_pct = ((ltp - previous_close) / previous_close * 100) if previous_close else 0.0
-    momentum_pct = ((ltp - float(close.iloc[-6])) / float(close.iloc[-6]) * 100) if len(close) >= 6 and close.iloc[-6] else 0.0
-    atr_value = float(atr.iloc[-1]) if pd.notna(atr.iloc[-1]) else max(float((high.tail(14) - low.tail(14)).mean() or 0), ltp * 0.0075)
-    support = float(low.tail(20).min())
-    resistance = float(high.tail(20).max())
-
-    signals_passed: list[str] = []
-    signals_failed: list[str] = []
-    checks = {
-        "LTP above VWAP": ltp >= vwap,
-        "EMA 9 above EMA 20": float(ema9.iloc[-1]) >= float(ema20.iloc[-1]),
-        "MACD above signal": float(macd.iloc[-1]) >= float(macd_signal.iloc[-1]),
-        "RSI constructive": 45 <= float(rsi.iloc[-1] if pd.notna(rsi.iloc[-1]) else 50) <= 72,
-        "ADX trend strength": float(adx.iloc[-1] if pd.notna(adx.iloc[-1]) else 0) >= 18,
-        "Supertrend supportive": ltp >= float(supertrend.iloc[-1]),
-        "Relative volume active": relative_volume >= 1.15,
-        "Positive day/momentum": day_change_pct >= 0 or momentum_pct >= 0,
-    }
-    for label, passed in checks.items():
-        (signals_passed if passed else signals_failed).append(label)
-
-    score = 35
-    score += 10 if checks["LTP above VWAP"] else -6
-    score += 10 if checks["EMA 9 above EMA 20"] else -6
-    score += 9 if checks["MACD above signal"] else -5
-    score += 8 if checks["RSI constructive"] else -5
-    score += 8 if checks["ADX trend strength"] else 0
-    score += 8 if checks["Supertrend supportive"] else -6
-    score += min(max((relative_volume - 1) * 12, -8), 18)
-    score += min(max(momentum_pct * 2.5, -10), 15)
-    score += 6 if ltp >= resistance * 0.998 else 0
-    score = max(0, min(100, score))
-
+    
+    from scanners.centralized_analysis_engine import centralized_analysis_engine
+    analysis = centralized_analysis_engine.analyze(symbol, quote, df, df)
+    
+    score = analysis.get("quality_score", 35)
     signal = "BUY" if score >= V30_INTRADAY_MIN_BUY_SCORE else "WATCH" if score >= V30_INTRADAY_MIN_WATCH_SCORE else "AVOID"
-    entry = ltp if signal != "AVOID" else 0.0
-    stoploss = max(support, entry - (atr_value * V30_INTRADAY_ATR_STOP_MULTIPLIER)) if entry else 0.0
-    risk = max(entry - stoploss, atr_value, 0.01) if entry else 0.0
-    target1 = entry + risk * V30_INTRADAY_TARGET_1R if entry else 0.0
-    target2 = entry + risk * V30_INTRADAY_TARGET_2R if entry else 0.0
-    target3 = entry + risk * V30_INTRADAY_TARGET_3R if entry else 0.0
-    selected = signal != "AVOID"
-    reason = (
-        f"{signal}: score {score:.0f}/100, VWAP {vwap:.2f}, EMA9 {ema9.iloc[-1]:.2f}, "
-        f"EMA20 {ema20.iloc[-1]:.2f}, RSI {_round(rsi.iloc[-1])}, rel vol {relative_volume:.2f}x."
-    )
-    if not selected:
-        reason += f" Rejected because failed signals: {', '.join(signals_failed[:4]) or 'insufficient confirmation'}."
-
+    
+    ltp = analysis.get("current_price") or quote.get("current_price") or df["Close"].iloc[-1]
+    previous_close = analysis.get("previous_close") or quote.get("previous_close") or (df["Close"].iloc[-2] if len(df) > 1 else df["Close"].iloc[-1])
+    
     row = {
+        **analysis,
         "stock": symbol,
         "symbol": symbol,
         "sector": "Intraday",
         "ltp": ltp,
         "live_price": ltp,
         "last_close": previous_close,
-        "open": _round(quote.get("open") or open_.iloc[-1]),
-        "high": _round(high.iloc[-1]),
-        "low": _round(low.iloc[-1]),
-        "volume": int(current_volume),
-        "vwap": _round(vwap),
-        "ema9": _round(ema9.iloc[-1]),
-        "ema20": _round(ema20.iloc[-1]),
-        "rsi": _round(rsi.iloc[-1]),
-        "macd": _round(macd.iloc[-1]),
-        "macd_signal": _round(macd_signal.iloc[-1]),
-        "adx": _round(adx.iloc[-1]),
-        "atr": _round(atr_value),
-        "supertrend": _round(supertrend.iloc[-1]),
-        "relative_volume": _round(relative_volume),
-        "volume_spike": relative_volume >= 1.5,
-        "day_change_pct": _round(day_change_pct),
-        "momentum_pct": _round(momentum_pct),
-        "score": _round(score),
-        "technical_score": _round(score),
-        "intraday_score": _round(score),
-        "confidence_pct": _round(min(95, max(20, score + len(signals_passed) * 2))),
-        "ml_probability": _round(min(95, max(20, score + momentum_pct))),
-        "profitability_score": _round(score),
-        "quality_score": _round(min(100, 40 + len(signals_passed) * 7 + min(relative_volume, 3) * 5)),
-        "risk_score": _round(max(5, min(90, (risk / max(entry, 1)) * 1000 if entry else 70))),
+        "open": analysis.get("open") or quote.get("open") or df["Open"].iloc[-1] if "Open" in df else ltp,
+        "high": df["High"].iloc[-1] if "High" in df else ltp,
+        "low": df["Low"].iloc[-1] if "Low" in df else ltp,
+        "volume": int(df["Volume"].iloc[-1]) if "Volume" in df and len(df) > 0 else 0,
+        "score": score,
+        "technical_score": score,
+        "intraday_score": score,
+        "confidence_pct": analysis.get("confidence") or score,
+        "ml_probability": analysis.get("confidence") or score,
+        "profitability_score": score,
+        "quality_score": score,
+        "risk_score": analysis.get("risk_score") or 50.0,
         "signal": signal,
         "grade": signal,
         "trade_type": "BUY" if signal == "BUY" else "WATCH" if signal == "WATCH" else "NO_TRADE",
         "premarket_action": signal,
         "final_decision": "Trade" if signal == "BUY" else "Watch" if signal == "WATCH" else "No Trade",
         "best_horizon": "Intraday",
-        "setup_type": "VWAP/EMA momentum" if selected else "No trade",
-        "entry": _round(entry),
-        "entry_price": _round(entry),
-        "stoploss": _round(stoploss),
-        "stop_loss": _round(stoploss),
-        "target1": _round(target1),
-        "target2": _round(target2),
-        "target3": _round(target3),
-        "risk_reward": _round((target2 - entry) / risk if entry and risk else 0),
-        "expected_return": _round(((target1 - entry) / entry * 100) if entry else 0),
-        "reason": reason,
-        "reason_selected": reason if selected else "",
-        "reason_rejected": "" if selected else reason,
-        "signals_passed": signals_passed,
-        "signals_failed": signals_failed,
-        "data_timestamp": datetime.now().isoformat(timespec="seconds"),
+        "entry": analysis.get("entry") or ltp,
+        "entry_price": analysis.get("entry") or ltp,
+        "stoploss": analysis.get("stop_loss") or (ltp * 0.98),
+        "stop_loss": analysis.get("stop_loss") or (ltp * 0.98),
+        "target1": analysis.get("target1") or (ltp * 1.02),
+        "target2": analysis.get("target2") or (ltp * 1.04),
+        "target3": analysis.get("target3") or (ltp * 1.06),
+        "risk_reward": analysis.get("risk_reward_ratio") or 2.0,
+        "reason": analysis.get("reason") or "",
+        "reason_selected": analysis.get("reason") if signal in ("BUY", "WATCH") else "",
+        "reason_rejected": "" if signal in ("BUY", "WATCH") else analysis.get("reason"),
         "scan_mode": "intraday",
         "scan_family": "intraday",
         "scanner_bucket": "intraday",
         "pipeline_stage": "quick_signal",
     }
+    
     return {
         "status": "ok",
         "symbol": symbol,
-        "interval": interval,
         "row": row,
+        "interval": interval,
         "data_state": "cached" if quote_cached and candles_cached else "fresh",
         "stale": False,
         "quote_cached": quote_cached,

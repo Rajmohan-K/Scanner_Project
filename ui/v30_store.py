@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime
 from typing import Any
 
@@ -64,115 +63,8 @@ def _symbol(row: dict[str, Any]) -> str:
     return str(row.get("symbol") or row.get("stock") or "").strip().upper()
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    try:
-        return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    except sqlite3.OperationalError:
-        return set()
-
-
-def _add_column(conn: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
-    if column not in _table_columns(conn, table):
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-
-
 def ensure_v30_schema() -> None:
     v20_store.ensure_db()
-    with v20_store.connect() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS scan_runs (
-                id TEXT PRIMARY KEY,
-                scan_type TEXT NOT NULL,
-                scan_family TEXT NOT NULL,
-                scanner_bucket TEXT NOT NULL,
-                pipeline_stage TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'queued',
-                source_scan_id TEXT,
-                started_at TEXT,
-                completed_at TEXT,
-                total_candidates INTEGER DEFAULT 0,
-                selected_count INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS scanner_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                scanner_run_id TEXT,
-                scan_type TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                rank INTEGER,
-                score REAL,
-                grade TEXT,
-                decision TEXT,
-                entry REAL,
-                stop_loss REAL,
-                target1 REAL,
-                target2 REAL,
-                target3 REAL,
-                risk_reward REAL,
-                confidence REAL,
-                reason_selected TEXT,
-                risk_warning TEXT,
-                payload TEXT,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS trade_plans (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                scan_type TEXT,
-                trade_type TEXT,
-                entry_zone TEXT,
-                stop_loss REAL,
-                target1 REAL,
-                target2 REAL,
-                target3 REAL,
-                risk_reward REAL,
-                confidence REAL,
-                invalidation_point TEXT,
-                reasoning TEXT,
-                payload TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-        )
-        for column, column_type in {
-            "message": "TEXT",
-            "report_path": "TEXT",
-            "symbols_scanned": "INTEGER DEFAULT 0",
-            "candidates_considered": "INTEGER DEFAULT 0",
-            "summary_json": "TEXT",
-            "scan_params_json": "TEXT",
-            "payload_json": "TEXT",
-            "archive_scan_id": "TEXT",
-        }.items():
-            _add_column(conn, "scan_runs", column, column_type)
-        for column, column_type in {
-            "scan_family": "TEXT",
-            "scanner_bucket": "TEXT",
-            "pipeline_stage": "TEXT",
-            "result_bucket": "TEXT",
-            "result_role": "TEXT",
-            "score_json": "TEXT",
-            "reasons_json": "TEXT",
-            "risk_json": "TEXT",
-            "trade_plan_json": "TEXT",
-            "reason_rejected": "TEXT",
-            "created_at": "TEXT",
-        }.items():
-            _add_column(conn, "scanner_results", column, column_type)
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_v30_scan_runs_type_created ON scan_runs(scan_family, scanner_bucket, pipeline_stage, created_at DESC)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_v30_scanner_results_run_bucket ON scanner_results(scanner_run_id, result_bucket, rank)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_v30_scanner_results_family_symbol ON scanner_results(scan_family, scanner_bucket, symbol, updated_at DESC)"
-        )
 
 
 def _metadata(body: dict[str, Any]) -> dict[str, str]:

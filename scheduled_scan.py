@@ -4,6 +4,10 @@ Standalone background scheduler for automated stock scans.
 Runs at specified times (default 9:00 AM IST) and saves results.
 """
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*timedelta.*")
+
 import argparse
 import sys
 from datetime import datetime

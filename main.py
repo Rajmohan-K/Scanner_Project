@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*timedelta.*")
+
 import argparse
 import re
 import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
@@ -94,7 +99,7 @@ def is_valid_symbol(symbol: str) -> bool:
         return False
     if normalized.startswith("^"):
         return True
-    return normalized.endswith(".NS")
+    return normalized.endswith(".NS") or normalized.endswith(".BO")
 
 
 def safe_print(*values: Any, **kwargs: Any) -> None:
@@ -211,23 +216,11 @@ def fetch_symbol_data(symbol: str, period: str, interval: str) -> pd.DataFrame:
 
 
 def load_symbols(args: argparse.Namespace) -> list[str]:
-    symbols = list(args.symbols or [])
+    raw_candidates = list(args.symbols or [])
 
     if args.auto_nse_universe:
         nse_symbols = fetch_nse_universe(force_refresh=args.refresh_universe) or []
-        valid_nse_symbols = []
-        for symbol in nse_symbols:
-            normalized = normalize_symbol(symbol)
-            if normalized and is_valid_symbol(normalized):
-                valid_nse_symbols.append(normalized)
-            else:
-                logger.warning(f"Auto NSE universe dropped invalid symbol: {symbol}")
-
-        if valid_nse_symbols:
-            output_path = write_symbols_file(args.universe_output, valid_nse_symbols)
-            logger.info(f"NSE universe written to {output_path}")
-            return valid_nse_symbols
-        logger.warning("Falling back because NSE universe auto-generation returned no valid symbols")
+        raw_candidates.extend(nse_symbols)
 
     if args.symbols_file:
         file_path = Path(args.symbols_file)
@@ -237,35 +230,75 @@ def load_symbols(args: argparse.Namespace) -> list[str]:
                 for line in file_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            symbols.extend(extra_symbols)
+            raw_candidates.extend(extra_symbols)
         else:
             logger.warning(f"Symbols file not found: {args.symbols_file}")
 
-    deduped = []
-    seen: set[str] = set()
-    for symbol in symbols:
-        normalized = normalize_symbol(symbol)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            deduped.append(normalized)
+    # Add watchlist symbols
+    try:
+        from ui.watchlist_monitor import watchlist_monitor
+        raw_candidates.extend([item.get("symbol") for item in watchlist_monitor.list_items() if item.get("symbol")])
+        raw_candidates.extend([item.get("isin") for item in watchlist_monitor.list_items() if item.get("isin")])
+    except Exception as exc:
+        logger.debug(f"Failed to import watchlist symbols into scanner universe: {exc}")
 
-    valid_symbols = []
-    for symbol in deduped:
-        if is_valid_symbol(symbol):
-            valid_symbols.append(symbol)
-        else:
-            logger.warning(f"Skipping invalid symbol: {symbol}")
+    # Add active Groww and custom symbols
+    try:
+        from ui.stock_registry import stock_registry
+        raw_candidates.extend(list(stock_registry.groww_active_intraday_stocks))
+        raw_candidates.extend(list(stock_registry.custom_symbols))
+    except Exception as exc:
+        logger.debug(f"Failed to import registry symbols into scanner universe: {exc}")
 
-    return valid_symbols
+    # Add currently tracked service symbols
+    try:
+        from ui.stock_data_service import stock_data_service
+        raw_candidates.extend(list(stock_data_service.tracked_symbols))
+    except Exception as exc:
+        logger.debug(f"Failed to import tracked service symbols into scanner universe: {exc}")
+
+    # Resolve all raw candidates via CompanySymbolRegistry to prevent duplicate records
+    from ui.stock_registry import resolve_stock_identifier
+    resolved_tickers = []
+    seen_isins = set()
+
+    for candidate in raw_candidates:
+        if not candidate:
+            continue
+        try:
+            resolved = resolve_stock_identifier(candidate)
+            if resolved:
+                isin = resolved["isin"]
+                if isin not in seen_isins:
+                    seen_isins.add(isin)
+                    preferred_ticker = resolved.get("nse_ticker") or resolved.get("bse_ticker") or isin
+                    resolved_tickers.append(preferred_ticker)
+        except Exception as e:
+            logger.warning(f"Failed to resolve scanner universe candidate '{candidate}': {e}")
+
+    # Fallback to normal flow if nothing resolved
+    if not resolved_tickers:
+        logger.warning("Unified universe builder resolved 0 symbols. Falling back to legacy resolution.")
+        deduped = []
+        seen = set()
+        for symbol in raw_candidates:
+            normalized = normalize_symbol(symbol)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                deduped.append(normalized)
+        return [s for s in deduped if is_valid_symbol(s)]
+
+    logger.info(f"Unified Scanner Universe built with {len(resolved_tickers)} stocks (deduplicated via ISIN)")
+    return resolved_tickers
 
 
 def fetch_all_stock_data(
-    symbols: list[str], period: str, interval: str, workers: int
+    symbols: list[str], period: str, interval: str, workers: int, should_cancel=None
 ) -> dict[str, pd.DataFrame]:
     stock_frames: dict[str, pd.DataFrame] = {}
     valid_symbols = [symbol for symbol in (normalize_symbol(symbol) for symbol in symbols) if symbol]
 
-    raw_frames = get_bulk_stock_data(valid_symbols, period=period, interval=interval) or {}
+    raw_frames = get_bulk_stock_data(valid_symbols, period=period, interval=interval, should_cancel=should_cancel) or {}
     for symbol in valid_symbols:
         df = normalize_ohlcv(raw_frames.get(symbol, pd.DataFrame()))
         if is_valid_df(df):
@@ -536,10 +569,19 @@ def fetch_sector_frames(
         if sector_symbol
     }
 
-    for sector_symbol in sector_symbols:
-        sector_df = fetch_symbol_data(sector_symbol, period=period, interval=interval)
-        if is_valid_df(sector_df, 20):
-            sector_frames[sector_symbol] = sector_df
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {
+            executor.submit(fetch_symbol_data, sector_symbol, period, interval): sector_symbol
+            for sector_symbol in sector_symbols
+        }
+        for future in as_completed(futures):
+            sector_symbol = futures[future]
+            try:
+                sector_df = future.result()
+                if is_valid_df(sector_df, 20):
+                    sector_frames[sector_symbol] = sector_df
+            except Exception as e:
+                logger.error(f"Error fetching sector data for {sector_symbol}: {e}", exc_info=True)
 
     return sector_frames
 
@@ -1037,7 +1079,10 @@ def score_fast_candidate(
     benchmark_df: pd.DataFrame,
     breadth_result: dict[str, Any],
     sector_frames: dict[str, pd.DataFrame],
+    should_cancel=None,
 ) -> dict[str, Any] | None:
+    if should_cancel and should_cancel():
+        return None
     if not is_valid_df(df):
         return None
 
@@ -1095,7 +1140,11 @@ def analyze_stock(
     market_open_analysis: bool = False,
     intraday_df: pd.DataFrame | None = None,
     market_open_time: str = "09:08",
+    scan_mode: str = "standard",
+    should_cancel=None,
 ) -> dict[str, Any] | None:
+    if should_cancel and should_cancel():
+        return None
     if not is_valid_df(df):
         return None
 
@@ -1289,6 +1338,7 @@ def analyze_stock(
 
     result_payload = {
         "stock": symbol,
+        "scan_mode": scan_mode,
         "sector": get_stock_sector(symbol) or "UNKNOWN",
         "last_close": last_close,
         "score": round(final_score, 2),
@@ -1438,6 +1488,22 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     logger.info("=" * 60)
     logger.info(f"STARTING SCAN: symbols={args.symbols}, period={args.period}")
     logger.info("=" * 60)
+
+    import time
+    start_time = time.time()
+
+    def update_progress(pct: int, msg: str):
+        setattr(args, "progress", pct)
+        setattr(args, "status_message", msg)
+        elapsed = time.time() - start_time
+        if pct > 0:
+            total_est = elapsed / (pct / 100.0)
+            remaining = max(0.0, total_est - elapsed)
+            setattr(args, "remaining_seconds", int(remaining))
+        else:
+            setattr(args, "remaining_seconds", -1)
+
+    update_progress(0, "Initializing scan params...")
     filter_overrides = build_filter_overrides(args)
     profile = scanner_profile(getattr(args, "scan_mode", "standard"), getattr(args, "pipeline_stage", None))
     scan_metadata = build_scan_metadata(profile.mode, profile.stage)
@@ -1450,6 +1516,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     if int(getattr(args, "validation_pool", 0) or 0) < 0:
         setattr(args, "validation_pool", profile.default_validation_pool)
     
+    update_progress(3, "Loading symbols...")
     symbols = load_symbols(args)
     # cooperative cancellation: args may expose a `should_cancel()` callable
     should_cancel = getattr(args, "should_cancel", None)
@@ -1462,6 +1529,8 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     if callable(should_cancel) and should_cancel():
         logger.info("Scan cancelled before start: symbols loaded")
         return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
+    
+    update_progress(5, f"Loaded {len(symbols)} symbols. Warming data...")
     safe_print(f"1. Loaded {len(symbols)} symbols", flush=True)
     logger.info(f"1. Loaded {len(symbols)} symbols")
     if not symbols:
@@ -1474,11 +1543,13 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     logger.info("2. Starting fetch_all_stock_data...")
+    update_progress(10, f"Fetching OHLCV data for {len(symbols)} symbols...")
     stock_frames = fetch_all_stock_data(
         symbols,
         period=args.period,
         interval=args.interval,
         workers=args.workers,
+        should_cancel=should_cancel,
     )
     logger.info(f"   Got {len(stock_frames)} valid stock frames")
     
@@ -1498,6 +1569,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
 
     logger.info("3. Fetching benchmark data...")
+    update_progress(20, "Fetching benchmark and calculating breadth...")
     benchmark_df = fetch_symbol_data(
         args.benchmark,
         period=args.period,
@@ -1515,28 +1587,46 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     logger.info(f"   Got {len(sector_frames)} sector frames")
     
     logger.info("6. Scoring fast candidates...")
+    update_progress(25, f"Scoring {len(symbols)} candidates...")
     coarse_results = []
-    for i, symbol in enumerate(symbols):
-        df = stock_frames.get(symbol)
-        if df is None:
-            continue
+    max_workers = max(1, min(args.workers, 32))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for symbol in symbols:
+            df = stock_frames.get(symbol)
+            if df is None:
+                continue
+            future = executor.submit(
+                score_fast_candidate,
+                symbol=symbol,
+                df=df,
+                benchmark_df=benchmark_df,
+                breadth_result=breadth_result,
+                sector_frames=sector_frames,
+                should_cancel=should_cancel,
+            )
+            futures[future] = symbol
 
-        wait_if_paused(f"fast scoring {symbol}")
-        if callable(should_cancel) and should_cancel():
-            logger.info(f"Scan cancelled during fast scoring at symbol {symbol}")
-            return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
-
-        coarse_result = score_fast_candidate(
-            symbol=symbol,
-            df=df,
-            benchmark_df=benchmark_df,
-            breadth_result=breadth_result,
-            sector_frames=sector_frames,
-        )
-        if coarse_result:
-            coarse_results.append(coarse_result)
-        if (i + 1) % 5 == 0:
-            logger.info(f"   Scored {i + 1}/{len(symbols)} symbols")
+        completed_count = 0
+        for future in as_completed(futures):
+            symbol = futures[future]
+            if callable(should_cancel) and should_cancel():
+                logger.info(f"Scan cancelled during fast scoring at symbol {symbol}")
+                for f in futures:
+                    f.cancel()
+                return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
+            wait_if_paused(f"fast scoring {symbol}")
+            try:
+                coarse_result = future.result()
+                if coarse_result:
+                    coarse_results.append(coarse_result)
+            except Exception as e:
+                logger.error(f"Error scoring candidate {symbol}: {e}", exc_info=True)
+            completed_count += 1
+            pct = 25 + int((completed_count / len(futures)) * 25)
+            update_progress(pct, f"Fast screening: {completed_count}/{len(futures)} ({pct}%)")
+            if completed_count % 100 == 0 or completed_count == len(futures):
+                logger.info(f"   Scored {completed_count}/{len(futures)} symbols")
 
     logger.info(f"   {len(coarse_results)} candidates passed fast screening")
     
@@ -1551,6 +1641,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     logger.info("7. Sorting candidates by quality...")
+    update_progress(52, "Sorting candidates by quality score...")
     filtered_coarse_results = []
     rejected_fast_count = 0
     for coarse_result in coarse_results:
@@ -1578,6 +1669,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     logger.info(f"   Selecting {len(candidate_symbols)} candidates for deep analysis")
     
     logger.info("8. Fetching global market data...")
+    update_progress(55, "Fetching macro risk indices...")
     global_market_data = get_global_market_data() or {}
     advanced_macro_data = get_advanced_macro_data() or {}
     market_news = get_market_news(limit=8)
@@ -1586,6 +1678,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     market_open_frames: dict[str, pd.DataFrame] = {}
     if getattr(args, "market_open_analysis", False):
         logger.info("   Fetching intraday market-open data for filtered candidates...")
+        update_progress(58, "Fetching intraday open frames...")
         market_open_frames = fetch_intraday_stock_data(
             candidate_symbols,
             period="1d",
@@ -1594,42 +1687,67 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         )
         logger.info(f"   Loaded intraday data for {len(market_open_frames)} candidate symbols")
 
+    update_progress(60, f"Analyzing {len(candidate_symbols)} candidates...")
     results = []
-    for idx, symbol in enumerate(candidate_symbols):
-        logger.info(f"   Analyzing {symbol} ({idx + 1}/{len(candidate_symbols)})...")
-        wait_if_paused(f"deep analysis {symbol}")
-        if callable(should_cancel) and should_cancel():
-            logger.info(f"Scan cancelled during deep analysis at symbol {symbol}")
-            return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
-        df = stock_frames.get(symbol)
-        if df is None:
-            continue
-
-        result = analyze_stock(
-            symbol=symbol,
-            df=df,
-            benchmark_df=benchmark_df,
-            breadth_result=breadth_result,
-            sector_frames=sector_frames,
-            global_market_data=global_market_data,
-            advanced_macro_data=advanced_macro_data,
-            market_news=market_news,
-            period=args.period,
-            interval=args.interval,
-            include_walk_forward=False,
-            include_optimization=False,
-            market_open_analysis=getattr(args, "market_open_analysis", False),
-            intraday_df=market_open_frames.get(symbol),
-            market_open_time=args.market_open_time,
-        )
-        if result:
-            results.append(
-                annotate_deep_filter(
-                    result,
-                    strict=getattr(args, "strict_shortlist", False),
-                    overrides=filter_overrides,
-                )
+    max_workers = max(1, min(args.workers, 20))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for idx, symbol in enumerate(candidate_symbols):
+            df = stock_frames.get(symbol)
+            if df is None:
+                continue
+            future = executor.submit(
+                analyze_stock,
+                symbol=symbol,
+                df=df,
+                benchmark_df=benchmark_df,
+                breadth_result=breadth_result,
+                sector_frames=sector_frames,
+                global_market_data=global_market_data,
+                advanced_macro_data=advanced_macro_data,
+                market_news=market_news,
+                period=args.period,
+                interval=args.interval,
+                include_walk_forward=False,
+                include_optimization=False,
+                market_open_analysis=getattr(args, "market_open_analysis", False),
+                intraday_df=market_open_frames.get(symbol),
+                market_open_time=args.market_open_time,
+                scan_mode=getattr(args, "scan_mode", "standard"),
+                should_cancel=should_cancel,
             )
+            futures[future] = symbol
+
+        completed_count = 0
+        for future in as_completed(futures):
+            symbol = futures[future]
+            if callable(should_cancel) and should_cancel():
+                logger.info(f"Scan cancelled during deep analysis at symbol {symbol}")
+                for f in futures:
+                    f.cancel()
+                return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
+            wait_if_paused(f"deep analysis {symbol}")
+            try:
+                result = future.result()
+                if result:
+                    annotated = annotate_deep_filter(
+                        result,
+                        strict=getattr(args, "strict_shortlist", False),
+                        overrides=filter_overrides,
+                    )
+                    results.append(annotated)
+                    on_partial = getattr(args, "on_partial_result", None)
+                    if callable(on_partial):
+                        try:
+                            on_partial(annotated)
+                        except Exception as p_err:
+                            logger.warning(f"Error invoking on_partial_result for {symbol}: {p_err}")
+            except Exception as e:
+                logger.error(f"Error during deep analysis for {symbol}: {e}", exc_info=True)
+            completed_count += 1
+            pct = 60 + int((completed_count / len(futures)) * 25)
+            update_progress(pct, f"Deep analysis: {completed_count}/{len(futures)} ({pct}%)")
+            logger.info(f"   Analyzed {symbol} ({completed_count}/{len(futures)})...")
 
     scan_mode = normalize_scan_mode(getattr(args, "scan_mode", ""))
     deep_validation_enabled = bool(getattr(args, "enable_deep_validation", False))
@@ -1649,48 +1767,73 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
         validation_symbols = preliminary_df.head(max(args.top_n, args.validation_pool))["stock"].tolist()
         validation_symbol_set = set(validation_symbols)
         logger.info(f"10. Validating top {len(validation_symbols)} stocks with walk-forward...")
-        validated_results = []
-        validation_idx = 0
-        for result in results:
-            wait_if_paused(f"validation {result['stock']}")
-            if callable(should_cancel) and should_cancel():
-                logger.info("Scan cancelled during validation phase")
-                return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
-            if result["stock"] not in validation_symbol_set:
-                validated_results.append(result)
-                continue
-
-            validation_idx += 1
-            logger.info(f"    Re-analyzing {result['stock']} with optimization ({validation_idx}/{len(validation_symbols)})...")
-            df = stock_frames.get(result["stock"])
-            if df is None:
-                validated_results.append(result)
-                continue
-
-            validated_result = analyze_stock(
-                symbol=result["stock"],
-                df=df,
-                benchmark_df=benchmark_df,
-                breadth_result=breadth_result,
-                sector_frames=sector_frames,
-                global_market_data=global_market_data,
-                advanced_macro_data=advanced_macro_data,
-                market_news=market_news,
-                period=args.period,
-                interval=args.interval,
-                include_walk_forward=True,
-                include_optimization=True,
-                market_open_analysis=getattr(args, "market_open_analysis", False),
-                intraday_df=market_open_frames.get(result["stock"]),
-                market_open_time=args.market_open_time,
-            )
-            validated_results.append(
-                annotate_deep_filter(
-                    validated_result or result,
-                    strict=getattr(args, "strict_shortlist", False),
-                    overrides=filter_overrides,
+        update_progress(85, f"Validating {len(validation_symbols)} stocks...")
+        max_workers = max(1, min(args.workers, 10))
+        validated_result_map = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for result in results:
+                symbol = result["stock"]
+                if symbol not in validation_symbol_set:
+                    continue
+                df = stock_frames.get(symbol)
+                if df is None:
+                    continue
+                future = executor.submit(
+                    analyze_stock,
+                    symbol=symbol,
+                    df=df,
+                    benchmark_df=benchmark_df,
+                    breadth_result=breadth_result,
+                    sector_frames=sector_frames,
+                    global_market_data=global_market_data,
+                    advanced_macro_data=advanced_macro_data,
+                    market_news=market_news,
+                    period=args.period,
+                    interval=args.interval,
+                    include_walk_forward=True,
+                    include_optimization=True,
+                    market_open_analysis=getattr(args, "market_open_analysis", False),
+                    intraday_df=market_open_frames.get(result["stock"]),
+                    market_open_time=args.market_open_time,
+                    scan_mode=getattr(args, "scan_mode", "standard"),
+                    should_cancel=should_cancel,
                 )
-            )
+                futures[future] = symbol
+
+            completed_count = 0
+            for future in as_completed(futures):
+                symbol = futures[future]
+                if callable(should_cancel) and should_cancel():
+                    logger.info("Scan cancelled during validation phase")
+                    for f in futures:
+                        f.cancel()
+                    return {"status": "cancelled", "message": "Scan cancelled by user.", "ranked": pd.DataFrame(), "results": [], "report_path": None}
+                wait_if_paused(f"validation {symbol}")
+                try:
+                    validated_result = future.result()
+                    if validated_result:
+                        validated_result_map[symbol] = validated_result
+                except Exception as e:
+                    logger.error(f"Error during validation for {symbol}: {e}", exc_info=True)
+                completed_count += 1
+                pct = 85 + int((completed_count / len(futures)) * 10)
+                update_progress(pct, f"Validation: {completed_count}/{len(futures)} ({pct}%)")
+                logger.info(f"    Validated {symbol} ({completed_count}/{len(futures)})...")
+
+        validated_results = []
+        for result in results:
+            symbol = result["stock"]
+            if symbol in validation_symbol_set and symbol in validated_result_map:
+                validated_results.append(
+                    annotate_deep_filter(
+                        validated_result_map[symbol],
+                        strict=getattr(args, "strict_shortlist", False),
+                        overrides=filter_overrides,
+                    )
+                )
+            else:
+                validated_results.append(result)
 
         results = validated_results
     elif results:
@@ -1700,6 +1843,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
             logger.info("10. Skipping walk-forward optimization because enable_deep_validation is false.")
 
     logger.info("11. Ranking final results...")
+    update_progress(96, "Ranking final opportunity results...")
     wait_if_paused("ranking")
     if callable(should_cancel) and should_cancel():
         logger.info("Scan cancelled before ranking")
@@ -1739,6 +1883,7 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
             )
 
     logger.info(f"12. Generating report with {len(ranked)} ranked stocks...")
+    update_progress(98, "Generating final report and excel sheet...")
 
     wait_if_paused("report generation")
     if callable(should_cancel) and should_cancel():
@@ -1800,6 +1945,8 @@ def run_scan(args: argparse.Namespace) -> dict[str, Any]:
     final_count_label = "fallback-ranked stocks" if fallback_ranked else "qualified stocks"
     logger.info(f"SCAN COMPLETE: {len(ranked)} {final_count_label}, report at {report_path}")
     logger.info("=" * 60)
+
+    update_progress(100, "Scan completed.")
 
     scan_output = {
         "status": "ok",

@@ -4,7 +4,7 @@ import yfinance as yf
 
 from config import OPTIONS_CACHE_TTL
 from data.cache_utils import load_cache, save_cache
-from data.yfinance_utils import ensure_yfinance_cache
+from data.yfinance_utils import ensure_yfinance_cache, get_yfinance_session
 from utils.logger import logger
 
 NSE_HOME_URL = "https://www.nseindia.com"
@@ -116,7 +116,7 @@ def get_options_data(
             save_cache("options", cache_key, nse_options)
             return nse_options
 
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol, session=get_yfinance_session())
         expiries = list(getattr(ticker, "options", []) or [])
         if not expiries:
             return {

@@ -1,15 +1,58 @@
 "use client";
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Activity, Clock, ExternalLink, Play, RefreshCw, Send, Settings2, UploadCloud } from 'lucide-react';
+import { Activity, Clock, ExternalLink, Play, RefreshCw, Send, Settings2, UploadCloud, Plus, Trash2, Check } from 'lucide-react';
 import StockGrid from '@/components/molecules/LazyStockGrid';
-import { getGrowwIntradayStocks, getV20Quote } from '@/lib/api';
+import { getGrowwIntradayStocks, getV20Quote, getV20Quotes, getWatchlist, addWatchlistItem, deleteWatchlistItem } from '@/lib/api';
 import { useToast } from '@/components/layout/ToastProvider';
 import { DataTable, MetricTile, PageHero, TerminalPanel } from '@/components/terminal/TerminalPrimitives';
 import { defaultGrowwSettings, GROWW_EVENT, GROWW_PRIORITY_UPDATED_EVENT, GrowwAutoSettings, pushSymbolsToIntraday, readGrowwPriorityActive, readGrowwPriorityHistory, readGrowwResults, readGrowwSettings, runGrowwIntradayAnalysis, writeGrowwPriorityActive, writeGrowwPriorityHistory, writeGrowwSettings } from '@/lib/growwIntraday';
 import GrowwPriorityPanel from '@/components/organisms/GrowwPriorityPanel';
 
-type GrowwRow = { company: string; symbol: string; resolved: boolean; candidates?: string[]; source?: string };
+type GrowwRow = { 
+  company: string; 
+  symbol: string; 
+  resolved: boolean; 
+  candidates?: string[]; 
+  source?: string;
+  current_price?: number;
+  price_change_pct?: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  previous_close?: number;
+  vwap?: number;
+  ema9?: number;
+  ema20?: number;
+  ema50?: number;
+  ema200?: number;
+  volume_spike?: number;
+  breakout_level?: number;
+  support?: number;
+  resistance?: number;
+  target1?: number;
+  target2?: number;
+  stop_loss?: number;
+  expected_profit_percent?: number;
+  expected_loss_percent?: number;
+  risk_reward_ratio?: number;
+  quality_score?: number;
+  quality_label?: string;
+  decision?: string;
+  action?: string;
+  reason?: string;
+  is_newly_added?: boolean;
+  is_custom_watchlist?: boolean;
+  suggested_at?: string;
+  pl_after_suggestion?: number;
+  already_moved_percent?: number;
+  remaining_upside_percent?: number;
+  distance_to_breakout_percent?: number;
+  distance_from_vwap_percent?: number;
+  distance_from_intraday_high_percent?: number;
+  intraday_high?: number;
+  overall_score?: number;
+};
 
 export default function GrowwIntradayPage() {
   const toast = useToast();
@@ -25,10 +68,171 @@ export default function GrowwIntradayPage() {
   const [showAutoConfig, setShowAutoConfig] = useState(false);
   const [displayLimit, setDisplayLimit] = useState(10);
 
+  // Advanced Quantitative Filters state
+  const [filterMinPrice, setFilterMinPrice] = useState<string>('');
+  const [filterMaxPrice, setFilterMaxPrice] = useState<string>('');
+  const [filterMinChange, setFilterMinChange] = useState<string>('');
+  const [filterMaxChange, setFilterMaxChange] = useState<string>('');
+  const [filterMinVolume, setFilterMinVolume] = useState<string>('');
+  const [filterMaxBreakoutDist, setFilterMaxBreakoutDist] = useState<string>('');
+  const [filterMaxVwapDist, setFilterMaxVwapDist] = useState<string>('');
+  const [filterMinRR, setFilterMinRR] = useState<string>('');
+  const [filterMinProfit, setFilterMinProfit] = useState<string>('');
+  const [filterMaxAlreadyMoved, setFilterMaxAlreadyMoved] = useState<string>('');
+  const [filterMinRemainingUpside, setFilterMinRemainingUpside] = useState<string>('');
+  
+  const [filterNearHigh, setFilterNearHigh] = useState<boolean>(false);
+  const [filterBuyReadyOnly, setFilterBuyReadyOnly] = useState<boolean>(false);
+  const [filterWaitOnly, setFilterWaitOnly] = useState<boolean>(false);
+  const [filterAvoidOnly, setFilterAvoidOnly] = useState<boolean>(false);
+  const [filterNewlyAdded, setFilterNewlyAdded] = useState<boolean>(false);
+  const [filterHighQualityScore, setFilterHighQualityScore] = useState<boolean>(false);
+  const [filterCustomWatchlist, setFilterCustomWatchlist] = useState<boolean>(false);
+
+  const [watchlistSymbols, setWatchlistSymbols] = useState<Set<string>>(new Set());
+
+  async function refreshWatchlist() {
+    try {
+      const data = await getWatchlist();
+      if (data?.items) {
+        setWatchlistSymbols(new Set(data.items.map(item => item.symbol.toUpperCase())));
+      }
+    } catch (err) {
+      console.error("Failed to load watchlist:", err);
+    }
+  }
+
+  useEffect(() => {
+    refreshWatchlist();
+  }, []);
+
   const symbols = useMemo(() => Array.from(new Set(rows.filter((row) => row.symbol).map((row) => row.symbol))), [rows]);
   const filteredResultRows = useMemo(() => {
     return resultRows.filter((row) => row.action && row.action !== 'AVOID');
   }, [resultRows]);
+
+  const filteredRows = useMemo(() => {
+    return rows.filter((row) => {
+      if (!row.symbol) return false;
+      
+      // Price range
+      if (filterMinPrice) {
+        const val = Number(row.current_price);
+        if (isNaN(val) || val < Number(filterMinPrice)) return false;
+      }
+      if (filterMaxPrice) {
+        const val = Number(row.current_price);
+        if (isNaN(val) || val > Number(filterMaxPrice)) return false;
+      }
+      
+      // Change %
+      if (filterMinChange) {
+        const val = Number(row.price_change_pct);
+        if (isNaN(val) || val < Number(filterMinChange)) return false;
+      }
+      if (filterMaxChange) {
+        const val = Number(row.price_change_pct);
+        if (isNaN(val) || val > Number(filterMaxChange)) return false;
+      }
+      
+      // Volume vs average
+      if (filterMinVolume) {
+        const val = Number(row.volume_spike);
+        if (isNaN(val) || val < Number(filterMinVolume)) return false;
+      }
+      
+      // Breakout distance
+      if (filterMaxBreakoutDist) {
+        const val = Number(row.distance_to_breakout_percent);
+        if (isNaN(val) || val > Number(filterMaxBreakoutDist)) return false;
+      }
+      
+      // VWAP distance
+      if (filterMaxVwapDist) {
+        const val = Number(row.distance_from_vwap_percent);
+        if (isNaN(val) || val > Number(filterMaxVwapDist)) return false;
+      }
+      
+      // Risk reward
+      if (filterMinRR) {
+        const val = Number(row.risk_reward_ratio);
+        if (isNaN(val) || val < Number(filterMinRR)) return false;
+      }
+      
+      // Expected profit %
+      if (filterMinProfit) {
+        const val = Number(row.expected_profit_percent);
+        if (isNaN(val) || val < Number(filterMinProfit)) return false;
+      }
+      
+      // Already moved %
+      if (filterMaxAlreadyMoved) {
+        const val = Number(row.already_moved_percent);
+        if (isNaN(val) || val > Number(filterMaxAlreadyMoved)) return false;
+      }
+      
+      // Remaining upside %
+      if (filterMinRemainingUpside) {
+        const val = Number(row.remaining_upside_percent);
+        if (isNaN(val) || val < Number(filterMinRemainingUpside)) return false;
+      }
+      
+      // Near high
+      if (filterNearHigh) {
+        const val = Number(row.distance_from_intraday_high_percent);
+        if (isNaN(val) || val >= 0.4) return false;
+      }
+      
+      // Decision filters
+      if (filterBuyReadyOnly && row.decision !== 'BUY READY') {
+        return false;
+      }
+      if (filterWaitOnly && !row.decision?.startsWith('WAIT')) {
+        return false;
+      }
+      if (filterAvoidOnly && !row.decision?.startsWith('AVOID') && row.decision !== 'AVOID') {
+        return false;
+      }
+      
+      // Newly added
+      if (filterNewlyAdded && !row.is_newly_added) {
+        return false;
+      }
+      
+      // High quality score
+      if (filterHighQualityScore && Number(row.quality_score ?? 0) < 75) {
+        return false;
+      }
+      
+      // Custom watchlist added
+      if (filterCustomWatchlist && !row.is_custom_watchlist) {
+        return false;
+      }
+      
+      return true;
+    });
+  }, [
+    rows,
+    filterMinPrice,
+    filterMaxPrice,
+    filterMinChange,
+    filterMaxChange,
+    filterMinVolume,
+    filterMaxBreakoutDist,
+    filterMaxVwapDist,
+    filterMinRR,
+    filterMinProfit,
+    filterMaxAlreadyMoved,
+    filterMinRemainingUpside,
+    filterNearHigh,
+    filterBuyReadyOnly,
+    filterWaitOnly,
+    filterAvoidOnly,
+    filterNewlyAdded,
+    filterHighQualityScore,
+    filterCustomWatchlist
+  ]);
+
   const unresolved = rows.filter((row) => !row.resolved);
 
   const activeRowsRef = React.useRef<any[]>([]);
@@ -42,6 +246,29 @@ export default function GrowwIntradayPage() {
   useEffect(() => {
     historyRowsRef.current = historyPriorityRows;
   }, [historyPriorityRows]);
+
+  // 1-second auto-refresh polling effect
+  useEffect(() => {
+    if (!rows.length || loading) return;
+    
+    let active = true;
+    const interval = setInterval(async () => {
+      if (!active) return;
+      try {
+        const payload = await getGrowwIntradayStocks(settings.limit);
+        if (active && payload?.rows) {
+          setRows(payload.rows);
+        }
+      } catch (err) {
+        console.error("Failed to auto-refresh Groww Intraday list:", err);
+      }
+    }, 1000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [rows.length, loading, settings.limit]);
 
   useEffect(() => {
     function sync() {
@@ -111,38 +338,45 @@ export default function GrowwIntradayPage() {
       if (!rows.length || quoteRefreshingRef.current) return;
       quoteRefreshingRef.current = true;
       try {
-        const closedRows: any[] = [];
-        const nextActive = await Promise.all(rows.map(async (row) => {
-          try {
-            const payload = await getV20Quote(row.symbol);
-            const quote = payload?.quote || {};
-            const live = Number(quote.current_price ?? quote.regularMarketPrice ?? quote.price ?? quote.last_close ?? row.live_price ?? row.last_price ?? 0);
-            if (!Number.isFinite(live) || live <= 0) return row;
-            
-            const enriched = {
-              ...row,
-              last_price: Math.round(live * 100) / 100,
-              live_price: Math.round(live * 100) / 100,
-              last_checked: new Date().toISOString()
-            };
-            const outcome = outcomeForPrice(enriched, live);
-            if (outcome) {
-              closedRows.push({
-                ...enriched,
-                status: outcome.status,
-                closed_at: new Date().toISOString(),
-                close_price: Math.round(live * 100) / 100,
-                close_reason: outcome.reason,
-              });
-              return null;
-            }
-            return enriched;
-          } catch {
-            return row;
-          }
-        }));
+        const symbols = rows.map((r) => r.symbol).filter(Boolean);
+        const payload = await getV20Quotes(symbols);
+        const quotes = payload?.quotes || {};
         
-        const cleanActive = nextActive.filter(Boolean);
+        const closedRows: any[] = [];
+        const nextActive: any[] = [];
+
+        rows.forEach((row) => {
+          const quote = quotes[row.symbol];
+          if (!quote) {
+            nextActive.push(row);
+            return;
+          }
+          const live = Number(quote.current_price ?? quote.regularMarketPrice ?? quote.price ?? quote.last_close ?? row.live_price ?? row.last_price ?? 0);
+          if (!Number.isFinite(live) || live <= 0) {
+            nextActive.push(row);
+            return;
+          }
+
+          const enriched = {
+            ...row,
+            last_price: Math.round(live * 100) / 100,
+            live_price: Math.round(live * 100) / 100,
+            last_checked: new Date().toISOString()
+          };
+          const outcome = outcomeForPrice(enriched, live);
+          if (outcome) {
+            closedRows.push({
+              ...enriched,
+              status: outcome.status,
+              closed_at: new Date().toISOString(),
+              close_price: Math.round(live * 100) / 100,
+              close_reason: outcome.reason,
+            });
+          } else {
+            nextActive.push(enriched);
+          }
+        });
+
         if (closedRows.length) {
           const nextHistory = [...closedRows, ...historyRowsRef.current].slice(0, 500);
           writeGrowwPriorityHistory(nextHistory);
@@ -153,10 +387,10 @@ export default function GrowwIntradayPage() {
           });
         }
         
-        if (cleanActive.length !== rows.length) {
-          writeGrowwPriorityActive(cleanActive);
-          setActivePriorityRows(cleanActive);
-        }
+        writeGrowwPriorityActive(nextActive);
+        setActivePriorityRows(nextActive);
+      } catch (err) {
+        console.error("Groww priority quote batch refresh failed:", err);
       } finally {
         quoteRefreshingRef.current = false;
       }
@@ -338,17 +572,316 @@ export default function GrowwIntradayPage() {
         />
       </TerminalPanel>
 
-      <TerminalPanel eyebrow="Groww Source" title="Resolved Intraday Symbols" actions={<>
+      {/* Advanced Quantitative Filters Panel */}
+      <div style={{
+        background: 'var(--surface-2)',
+        border: '1px solid var(--border)',
+        borderRadius: '8px',
+        padding: '16px',
+        margin: '0 16px 20px 16px',
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '16px'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text)' }}>
+            Advanced Quantitative Filters ({filteredRows.length} of {rows.length} matched)
+          </h3>
+          <button className="btn-secondary" style={{ padding: '4px 8px', fontSize: '0.7rem' }} onClick={() => {
+            setFilterMinPrice('');
+            setFilterMaxPrice('');
+            setFilterMinChange('');
+            setFilterMaxChange('');
+            setFilterMinVolume('');
+            setFilterMaxBreakoutDist('');
+            setFilterMaxVwapDist('');
+            setFilterMinRR('');
+            setFilterMinProfit('');
+            setFilterMaxAlreadyMoved('');
+            setFilterMinRemainingUpside('');
+            setFilterNearHigh(false);
+            setFilterBuyReadyOnly(false);
+            setFilterWaitOnly(false);
+            setFilterAvoidOnly(false);
+            setFilterNewlyAdded(false);
+            setFilterHighQualityScore(false);
+            setFilterCustomWatchlist(false);
+          }}>Reset Filters</button>
+        </div>
+
+        {/* Input fields grid */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: '12px'
+        }}>
+          {/* Price Range */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Price Range (INR)</span>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <input type="number" placeholder="Min" value={filterMinPrice} onChange={(e) => setFilterMinPrice(e.target.value)} style={{ width: '50%', padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+              <input type="number" placeholder="Max" value={filterMaxPrice} onChange={(e) => setFilterMaxPrice(e.target.value)} style={{ width: '50%', padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+            </div>
+          </div>
+
+          {/* Change % Range */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Change % Range</span>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <input type="number" step="0.1" placeholder="Min" value={filterMinChange} onChange={(e) => setFilterMinChange(e.target.value)} style={{ width: '50%', padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+              <input type="number" step="0.1" placeholder="Max" value={filterMaxChange} onChange={(e) => setFilterMaxChange(e.target.value)} style={{ width: '50%', padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+            </div>
+          </div>
+
+          {/* Volume vs Avg */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Min Volume vs Average</span>
+            <input type="number" step="0.1" placeholder="Min volume spike" value={filterMinVolume} onChange={(e) => setFilterMinVolume(e.target.value)} style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+          </div>
+
+          {/* Breakout Distance */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Max Breakout Distance %</span>
+            <input type="number" step="0.05" placeholder="Max distance %" value={filterMaxBreakoutDist} onChange={(e) => setFilterMaxBreakoutDist(e.target.value)} style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+          </div>
+
+          {/* VWAP Distance */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Max VWAP Distance %</span>
+            <input type="number" step="0.1" placeholder="Max distance %" value={filterMaxVwapDist} onChange={(e) => setFilterMaxVwapDist(e.target.value)} style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+          </div>
+
+          {/* Risk Reward */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Min Risk Reward Ratio</span>
+            <input type="number" step="0.1" placeholder="Min RR ratio" value={filterMinRR} onChange={(e) => setFilterMinRR(e.target.value)} style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+          </div>
+
+          {/* Expected Profit % */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Min Expected Profit %</span>
+            <input type="number" step="0.1" placeholder="Min profit %" value={filterMinProfit} onChange={(e) => setFilterMinProfit(e.target.value)} style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+          </div>
+
+          {/* Already Moved % */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Max Already Moved %</span>
+            <input type="number" step="0.1" placeholder="Max moved %" value={filterMaxAlreadyMoved} onChange={(e) => setFilterMaxAlreadyMoved(e.target.value)} style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+          </div>
+
+          {/* Remaining Upside % */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span style={{ fontSize: '0.65rem', color: 'var(--muted)', fontWeight: 700 }}>Min Remaining Upside %</span>
+            <input type="number" step="0.1" placeholder="Min upside %" value={filterMinRemainingUpside} onChange={(e) => setFilterMinRemainingUpside(e.target.value)} style={{ padding: '4px 8px', fontSize: '0.75rem', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text)' }} />
+          </div>
+        </div>
+
+        {/* Checkbox filters row */}
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '16px',
+          paddingTop: '8px',
+          borderTop: '1px solid var(--border)'
+        }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.7rem', color: 'var(--text)' }}>
+            <input type="checkbox" checked={filterNearHigh} onChange={(e) => setFilterNearHigh(e.target.checked)} />
+            Avoid Near High (&lt;0.4%)
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.7rem', color: 'var(--text)' }}>
+            <input type="checkbox" checked={filterBuyReadyOnly} onChange={(e) => setFilterBuyReadyOnly(e.target.checked)} disabled={filterWaitOnly || filterAvoidOnly} />
+            Buy Ready Only
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.7rem', color: 'var(--text)' }}>
+            <input type="checkbox" checked={filterWaitOnly} onChange={(e) => setFilterWaitOnly(e.target.checked)} disabled={filterBuyReadyOnly || filterAvoidOnly} />
+            Wait Only
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.7rem', color: 'var(--text)' }}>
+            <input type="checkbox" checked={filterAvoidOnly} onChange={(e) => setFilterAvoidOnly(e.target.checked)} disabled={filterBuyReadyOnly || filterWaitOnly} />
+            Avoid Only
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.7rem', color: 'var(--text)' }}>
+            <input type="checkbox" checked={filterNewlyAdded} onChange={(e) => setFilterNewlyAdded(e.target.checked)} />
+            Newly Added
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.7rem', color: 'var(--text)' }}>
+            <input type="checkbox" checked={filterHighQualityScore} onChange={(e) => setFilterHighQualityScore(e.target.checked)} />
+            High Quality Score (&ge;75)
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.7rem', color: 'var(--text)' }}>
+            <input type="checkbox" checked={filterCustomWatchlist} onChange={(e) => setFilterCustomWatchlist(e.target.checked)} />
+            Custom Watchlist Added
+          </label>
+        </div>
+      </div>
+
+      <TerminalPanel eyebrow="Groww Source" title="Resolved Intraday Symbols & Advanced Analytics" actions={<>
         <button className="btn-secondary" type="button" onClick={pushWithoutScan}><Send size={15} /> Send to Intraday Input</button>
       </>}>
-        <DataTable
-          columns={['Company', 'Resolved Symbol', 'Candidates']}
-          rows={(rows.length ? rows : []).slice(0, 80).map((row) => [
-            <strong key={`${row.company}-name`}>{row.company}</strong>,
-            row.symbol || <span className="status-badge status-warn">Needs mapping</span>,
-            row.candidates?.join(', ') || '-',
-          ])}
-        />
+        <div style={{ overflowX: 'auto', width: '100%' }}>
+          <div style={{ minWidth: '2200px' }}>
+            <DataTable
+              columns={[
+                'Symbol / Company', 
+                'LTP', 
+                'Open/High/Low/Prev Close', 
+                'VWAP', 
+                'EMA 9/20', 
+                'Volume vs Avg', 
+                'Breakout', 
+                'Support/Resistance', 
+                'Target 1/2', 
+                'Stop Loss', 
+                'Expected Profit %', 
+                'Expected Risk %', 
+                'Risk Reward', 
+                'Score', 
+                'Decision', 
+                'Reason', 
+                'Suggested Time', 
+                'P/L after Suggestion',
+                'Actions'
+              ]}
+              rows={filteredRows.map((row) => {
+                const isBuy = row.action === 'BUY READY';
+                const isWait = row.action === 'WAIT' || row.decision?.startsWith('WAIT');
+                const isAvoid = row.action === 'AVOID' || row.decision?.startsWith('AVOID');
+                
+                let decisionClass = 'status-info';
+                if (isBuy) decisionClass = 'status-good';
+                if (isWait) decisionClass = 'status-warn';
+                if (isAvoid) decisionClass = 'status-bad';
+                
+                const isAdded = watchlistSymbols.has(row.symbol.toUpperCase());
+                
+                const handleToggleWatchlist = async () => {
+                  try {
+                    if (isAdded) {
+                      await deleteWatchlistItem(row.symbol);
+                      toast.push(`${row.symbol} removed from Watchlist`, 'success');
+                    } else {
+                      await addWatchlistItem({ symbol: row.symbol, notes: 'groww', monitoring_enabled: true });
+                      toast.push(`${row.symbol} added to Watchlist`, 'success');
+                    }
+                    refreshWatchlist();
+                  } catch (err: any) {
+                    toast.push(err?.message || "Failed to update watchlist", 'error');
+                  }
+                };
+
+                return [
+                  <div key={`${row.symbol}-info`}>
+                    <strong>{row.symbol || '-'}</strong>
+                    {row.is_newly_added && <span className="status-badge status-good" style={{ marginLeft: '4px', fontSize: '0.55rem', padding: '1px 3px' }}>NEW</span>}
+                    {row.is_custom_watchlist && <span className="status-badge status-info" style={{ marginLeft: '4px', fontSize: '0.55rem', padding: '1px 3px' }}>WATCHLIST</span>}
+                    <div style={{ fontSize: '0.62rem', color: 'var(--muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '140px' }}>
+                      {row.company || '-'}
+                    </div>
+                  </div>,
+                  
+                  <strong key={`${row.symbol}-price`}>
+                    {row.current_price ? `INR ${Number(row.current_price).toFixed(2)}` : '-'}
+                  </strong>,
+                  
+                  <div key={`${row.symbol}-ohlc`} style={{ fontSize: '0.68rem', lineHeight: '1.2' }}>
+                    <div>O: {row.open ? Number(row.open).toFixed(1) : '-'} | H: {row.high ? Number(row.high).toFixed(1) : '-'}</div>
+                    <div>L: {row.low ? Number(row.low).toFixed(1) : '-'} | PC: {row.previous_close ? Number(row.previous_close).toFixed(1) : '-'}</div>
+                  </div>,
+                  
+                  <span key={`${row.symbol}-vwap`}>
+                    {row.vwap ? Number(row.vwap).toFixed(2) : '-'}
+                  </span>,
+                  
+                  <div key={`${row.symbol}-emas`} style={{ fontSize: '0.68rem', lineHeight: '1.2' }}>
+                    <div>9: {row.ema9 ? Number(row.ema9).toFixed(1) : '-'}</div>
+                    <div>20: {row.ema20 ? Number(row.ema20).toFixed(1) : '-'}</div>
+                  </div>,
+                  
+                  <span key={`${row.symbol}-volume`} className={Number(row.volume_spike) >= 2.0 ? 'tone-good' : undefined} style={{ fontWeight: Number(row.volume_spike) >= 2.0 ? 'bold' : 'normal' }}>
+                    {row.volume_spike ? `${Number(row.volume_spike).toFixed(2)}x` : '-'}
+                  </span>,
+                  
+                  <span key={`${row.symbol}-breakout`}>
+                    {row.breakout_level ? Number(row.breakout_level).toFixed(2) : '-'}
+                  </span>,
+                  
+                  <div key={`${row.symbol}-sr`} style={{ fontSize: '0.68rem', lineHeight: '1.2' }}>
+                    <div>S: {row.support ? Number(row.support).toFixed(1) : '-'}</div>
+                    <div>R: {row.resistance ? Number(row.resistance).toFixed(1) : '-'}</div>
+                  </div>,
+                  
+                  <div key={`${row.symbol}-targets`} style={{ fontSize: '0.68rem', lineHeight: '1.2' }}>
+                    <div>T1: {row.target1 ? Number(row.target1).toFixed(2) : '-'}</div>
+                    <div>T2: {row.target2 ? Number(row.target2).toFixed(2) : '-'}</div>
+                  </div>,
+                  
+                  <span key={`${row.symbol}-sl`}>
+                    {row.stop_loss ? Number(row.stop_loss).toFixed(2) : '-'}
+                  </span>,
+                  
+                  <span key={`${row.symbol}-expprog`} className="tone-good" style={{ fontFamily: 'monospace' }}>
+                    {row.expected_profit_percent ? `${Number(row.expected_profit_percent).toFixed(2)}%` : '-'}
+                  </span>,
+                  
+                  <span key={`${row.symbol}-exprisk`} className="tone-bad" style={{ fontFamily: 'monospace' }}>
+                    {row.expected_loss_percent ? `${Number(row.expected_loss_percent).toFixed(2)}%` : '-'}
+                  </span>,
+                  
+                  <span key={`${row.symbol}-rr`} className={Number(row.risk_reward_ratio) >= 1.8 ? 'tone-good' : undefined} style={{ fontWeight: Number(row.risk_reward_ratio) >= 1.8 ? 'bold' : 'normal' }}>
+                    {row.risk_reward_ratio ? Number(row.risk_reward_ratio).toFixed(2) : '-'}
+                  </span>,
+                  
+                  <div key={`${row.symbol}-score`} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <span className={`status-badge ${Number(row.quality_score) >= 75 ? 'status-good' : 'status-warn'}`} style={{ fontSize: '0.65rem', padding: '1px 4px' }}>
+                      {row.quality_score || '0'}
+                    </span>
+                    <span style={{ fontSize: '0.6rem', color: 'var(--muted)' }}>
+                      {row.quality_label || ''}
+                    </span>
+                  </div>,
+                  
+                  <span key={`${row.symbol}-decision`} className={`status-badge ${decisionClass}`}>
+                    {row.decision || 'WATCH'}
+                  </span>,
+                  
+                  <span key={`${row.symbol}-reason`} style={{ fontSize: '0.68rem', whiteSpace: 'normal', display: 'inline-block', maxWidth: '180px' }}>
+                    {row.reason || '-'}
+                  </span>,
+                  
+                  <span key={`${row.symbol}-suggested`} style={{ fontSize: '0.68rem', whiteSpace: 'nowrap' }}>
+                    {row.suggested_at || '-'}
+                  </span>,
+                  
+                  <span key={`${row.symbol}-pl`} className={Number(row.pl_after_suggestion) > 0 ? 'tone-good' : Number(row.pl_after_suggestion) < 0 ? 'tone-bad' : undefined} style={{ fontWeight: row.pl_after_suggestion ? 'bold' : 'normal' }}>
+                    {row.pl_after_suggestion !== null && row.pl_after_suggestion !== undefined ? `${Number(row.pl_after_suggestion).toFixed(2)}%` : '-'}
+                  </span>,
+                  
+                  <button 
+                    key={`${row.symbol}-action`} 
+                    className={`btn-${isAdded ? 'secondary' : 'primary'}`} 
+                    style={{ padding: '3px 8px', fontSize: '0.65rem', display: 'flex', alignItems: 'center', gap: '4px', height: '24px' }}
+                    onClick={handleToggleWatchlist}
+                  >
+                    {isAdded ? (
+                      <>
+                        <Check size={12} className="tone-good" />
+                        <span>Added</span>
+                      </>
+                    ) : (
+                      <>
+                        <Plus size={12} />
+                        <span>Watchlist</span>
+                      </>
+                    )}
+                  </button>
+                ];
+              })}
+              emptyTitle="No Groww symbols match filters"
+              emptyBody="Load Groww Intraday list or relax your filters to populate this analysis table."
+            />
+          </div>
+        </div>
         {!rows.length && <p className="small">No Groww rows loaded yet. Click Fetch List.</p>}
       </TerminalPanel>
 

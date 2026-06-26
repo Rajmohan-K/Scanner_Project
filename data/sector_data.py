@@ -1,7 +1,7 @@
 from utils.logger import logger
 import yfinance as yf
 import pandas as pd
-from data.yfinance_utils import ensure_yfinance_cache
+from data.yfinance_utils import ensure_yfinance_cache, get_yfinance_session
 
 
 # ==========================
@@ -94,7 +94,8 @@ def get_sector_data(
             sector_symbol,
             period=period,
             interval=interval,
-            progress=False
+            progress=False,
+            session=get_yfinance_session()
         )
 
         return df

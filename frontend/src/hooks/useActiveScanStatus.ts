@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import useSWR from 'swr';
 import { getActiveScans, getOptimisticActiveScans, SCAN_STATUS_EVENT } from '@/lib/api';
 
 export type ActiveScan = {
@@ -26,21 +27,6 @@ function extractActiveScans(payload: any): ActiveScan[] {
   });
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs = 3500): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error('Scan status timed out')), timeoutMs);
-    promise
-      .then((value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((err) => {
-        window.clearTimeout(timer);
-        reject(err);
-      });
-  });
-}
-
 function mergeActiveScans(serverScans: ActiveScan[], optimisticScans: ActiveScan[]) {
   const merged = [...serverScans];
   const serverIds = new Set(serverScans.map((scan) => String(scan.scan_id || scan.id || '')));
@@ -62,56 +48,40 @@ export function getActiveScanLabel(scan?: ActiveScan) {
 }
 
 export function useActiveScanStatus(pollMs = 5000) {
-  const [activeScans, setActiveScans] = useState<ActiveScan[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const inFlightRef = useRef(false);
-  const failuresRef = useRef(0);
+  const { data, error, isLoading, mutate } = useSWR('/api/scan/active/all', () => getActiveScans(), {
+    refreshInterval: pollMs,
+    dedupingInterval: 2000,
+    errorRetryCount: 3,
+  });
 
-  const refresh = useCallback(async () => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-    setLoading(true);
-    try {
-      const payload = await withTimeout(getActiveScans());
-      failuresRef.current = 0;
-      setActiveScans(mergeActiveScans(extractActiveScans(payload), getOptimisticActiveScans()));
-      setError('');
-    } catch {
-      failuresRef.current += 1;
-      const optimistic = getOptimisticActiveScans();
-      setActiveScans((current) => (current.length ? mergeActiveScans(current, optimistic) : optimistic));
-      setError(failuresRef.current >= 3 ? 'Scan status unavailable' : '');
-    } finally {
-      inFlightRef.current = false;
-      setLoading(false);
-    }
-  }, []);
+  const [optimistic, setOptimistic] = useState<ActiveScan[]>(() => getOptimisticActiveScans());
 
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      if (!cancelled) await refresh();
+    const handleOptimisticStatus = () => {
+      setOptimistic(getOptimisticActiveScans());
     };
-    load();
-    const timer = window.setInterval(load, pollMs);
-    const handleOptimisticStatus = () => setActiveScans((current) => mergeActiveScans(current, getOptimisticActiveScans()));
     window.addEventListener(SCAN_STATUS_EVENT, handleOptimisticStatus);
     window.addEventListener('storage', handleOptimisticStatus);
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
       window.removeEventListener(SCAN_STATUS_EVENT, handleOptimisticStatus);
       window.removeEventListener('storage', handleOptimisticStatus);
     };
-  }, [pollMs, refresh]);
+  }, []);
+
+  const activeScans = useMemo(() => {
+    return mergeActiveScans(extractActiveScans(data), optimistic);
+  }, [data, optimistic]);
+
+  const refresh = useCallback(async () => {
+    await mutate();
+  }, [mutate]);
 
   return useMemo(() => ({
     activeScans,
     activeCount: activeScans.length,
     primaryScan: activeScans[0],
-    loading,
-    error,
+    loading: isLoading,
+    error: error ? 'Scan status unavailable' : '',
     refresh,
-  }), [activeScans, error, loading, refresh]);
+  }), [activeScans, error, isLoading, refresh]);
 }
