@@ -2295,7 +2295,11 @@ kbd {
 }
 
 .command-palette {
+  display: flex;
+  flex-direction: column;
   width: min(720px, calc(100vw - 1.5rem));
+  max-height: min(620px, 78vh);
+  min-height: 132px;
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -2321,7 +2325,10 @@ kbd {
 
 .command-list {
   display: grid;
+  flex: 1 1 auto;
+  align-content: start;
   gap: 0.35rem;
+  min-height: 68px;
   max-height: 420px;
   overflow: auto;
   padding: 0.6rem;
@@ -3982,10 +3989,57 @@ select option:checked {
 
 .live-monitor-entry {
   display: grid !important;
-  grid-template-columns: minmax(240px, 1fr) auto !important;
-  gap: 0.75rem !important;
+  grid-template-columns: minmax(220px, 440px) auto !important;
+  gap: 0.5rem !important;
   align-items: end !important;
-  margin-bottom: 0.75rem !important;
+  margin-bottom: 0.55rem !important;
+}
+
+.live-stock-monitor-panel {
+  padding: 0.75rem !important;
+}
+
+.live-stock-monitor-panel .terminal-panel__header {
+  margin-bottom: 0.5rem !important;
+}
+
+.live-stock-monitor-panel .terminal-panel__header h2 {
+  font-size: 0.92rem !important;
+}
+
+.live-stock-monitor-panel .terminal-actions,
+.live-stock-monitor-panel .link-button {
+  min-height: 28px !important;
+  font-size: 0.72rem !important;
+}
+
+.live-monitor-search {
+  position: relative;
+  z-index: 45;
+}
+
+.live-monitor-search .field {
+  gap: 0.18rem !important;
+}
+
+.live-monitor-search .field > span {
+  font-size: 0.62rem !important;
+}
+
+.live-monitor-search input {
+  min-height: 32px !important;
+  padding: 0.35rem 0.5rem !important;
+  font-size: 0.78rem !important;
+}
+
+.live-monitor-add {
+  min-height: 32px !important;
+  padding: 0.35rem 0.65rem !important;
+  font-size: 0.74rem !important;
+}
+
+.live-monitor-suggestions {
+  width: min(420px, 82vw);
 }
 
 .live-monitor-list {
@@ -5843,4 +5897,397 @@ select option:checked {
 
 .dashboard-shell-grid {
   grid-template-columns: minmax(0, 1fr) !important;
+}
+
+/* Realtime Algo Trading */
+.algo-page {
+  display: grid;
+  gap: 0.8rem;
+  min-width: 0;
+}
+
+.algo-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.15rem 0;
+}
+
+.algo-titlebar h1 {
+  margin: 0.08rem 0 0;
+  font-size: 1.35rem;
+  letter-spacing: 0;
+}
+
+.algo-mode-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.algo-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  gap: 0.3rem;
+  padding: 0.25rem 0.48rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 0.64rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.algo-chip.is-paper,
+.algo-chip.is-live {
+  border-color: rgba(72, 213, 155, 0.4);
+  color: var(--success);
+  background: rgba(72, 213, 155, 0.08);
+}
+
+.algo-chip.is-locked,
+.algo-chip.is-stale {
+  border-color: rgba(255, 93, 117, 0.42);
+  color: var(--danger);
+  background: rgba(255, 93, 117, 0.08);
+}
+
+.algo-alert {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 34px;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid rgba(255, 93, 117, 0.45);
+  border-radius: 6px;
+  color: var(--danger);
+  background: rgba(255, 93, 117, 0.07);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.algo-control-band {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.8fr) repeat(4, minmax(105px, 0.72fr)) auto auto minmax(260px, 1.4fr);
+  gap: 0.5rem;
+  align-items: end;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.algo-control-band > label,
+.algo-status-block {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.algo-control-band label > span,
+.algo-status-block > span {
+  color: var(--muted);
+  font-size: 0.61rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.algo-control-band input[type="number"] {
+  width: 100%;
+  min-height: 34px;
+  padding: 0.35rem 0.48rem;
+  font-size: 0.76rem;
+}
+
+.algo-status-block {
+  min-height: 44px;
+}
+
+.algo-status-block strong {
+  font-size: 0.92rem;
+}
+
+.algo-status-block small {
+  overflow: hidden;
+  max-width: 190px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.algo-toggle {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  min-height: 34px;
+  gap: 0.35rem !important;
+  padding: 0.35rem 0.48rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-3);
+}
+
+.algo-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.algo-toggle > span {
+  color: var(--text) !important;
+  text-transform: none !important;
+  white-space: nowrap;
+}
+
+.algo-toggle.is-disabled {
+  opacity: 0.55;
+}
+
+.algo-control-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.algo-control-actions button {
+  min-height: 34px;
+  padding: 0.38rem 0.55rem;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.algo-primary-grid,
+.algo-secondary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.algo-primary-grid .terminal-panel,
+.algo-secondary-grid .terminal-panel {
+  min-height: 220px;
+}
+
+.algo-selected-trade {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.algo-selected-trade > div {
+  display: grid;
+  gap: 0.18rem;
+  min-height: 54px;
+  padding: 0.48rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-3);
+}
+
+.algo-selected-trade span,
+.algo-position-pnl span,
+.algo-review-list span {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.algo-selected-trade strong {
+  overflow: hidden;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.algo-selected-trade > p {
+  grid-column: 1 / -1;
+  margin: 0.1rem 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.algo-live-position {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.algo-position-head,
+.algo-position-pnl {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.algo-position-head strong {
+  color: var(--accent);
+  font-size: 1rem;
+}
+
+.algo-position-pnl {
+  padding: 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-3);
+}
+
+.algo-position-pnl strong {
+  font-size: 1.15rem;
+}
+
+.algo-live-position dl {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.algo-live-position dl div {
+  display: grid;
+  gap: 0.16rem;
+}
+
+.algo-live-position dt {
+  color: var(--muted);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+}
+
+.algo-live-position dd {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.algo-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(105px, 1fr));
+  gap: 0.5rem;
+}
+
+.algo-metrics-grid .metric-tile {
+  min-height: 72px;
+  padding: 0.55rem;
+}
+
+.algo-metrics-grid .metric-tile strong {
+  font-size: 0.78rem;
+}
+
+.algo-page .table-wrap {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.algo-page table {
+  min-width: 1500px;
+}
+
+.algo-page th,
+.algo-page td {
+  padding: 0.48rem 0.52rem;
+  font-size: 0.68rem;
+}
+
+.algo-chart {
+  display: grid;
+  gap: 0.65rem;
+  min-height: 150px;
+}
+
+.algo-chart > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.algo-chart svg {
+  width: 100%;
+  height: 130px;
+  overflow: visible;
+}
+
+.algo-chart line {
+  stroke: var(--border);
+  stroke-width: 0.5;
+}
+
+.algo-chart polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.algo-review-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.algo-review-list > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 0.6rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.algo-review-list p {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.72rem;
+}
+
+@media (max-width: 1500px) {
+  .algo-control-band {
+    grid-template-columns: repeat(4, minmax(110px, 1fr));
+  }
+
+  .algo-status-block,
+  .algo-control-actions {
+    grid-column: span 2;
+  }
+
+  .algo-metrics-grid {
+    grid-template-columns: repeat(5, minmax(110px, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .algo-titlebar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .algo-mode-strip {
+    justify-content: flex-start;
+  }
+
+  .algo-control-band,
+  .algo-primary-grid,
+  .algo-secondary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .algo-status-block,
+  .algo-control-actions {
+    grid-column: auto;
+  }
+
+  .algo-control-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .algo-metrics-grid,
+  .algo-selected-trade {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.allow-overflow {
+  overflow: visible !important;
 }

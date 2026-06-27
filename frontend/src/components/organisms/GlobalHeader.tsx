@@ -2,21 +2,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Activity, FileText, LayoutDashboard, LineChart, Radar, ShieldCheck, Star, Target, Trophy, UploadCloud } from 'lucide-react';
+import { Activity, Bot, FileText, LayoutDashboard, LineChart, Radar, ShieldCheck, Star, Target, Trophy, UploadCloud } from 'lucide-react';
 import { getActiveScanLabel, useActiveScanStatus } from '@/hooks/useActiveScanStatus';
 import { useRealtime } from '@/hooks/useRealtime';
 import { addPriorityCandidates, inferPriorityHorizon } from '@/lib/priorityPicks';
 
 const navItems = [
   ['Watchlist Monitor', '/watchlist', Star],
+  ['ALGO Watchlist', '/algo-watchlist', Target],
   ['Signal History', '/signals', Target],
   ['Dashboard', '/dashboard', LayoutDashboard],
-  ['Premarket Pipeline', '/premarket', Activity],
+  ['Algo Trading', '/algo-trading', Bot],
   ['Stock Scanner', '/scan-center', Radar],
   ['Priority Picks', '/priority-picks', Trophy],
   ['Groww Source', '/groww-intraday', UploadCloud],
-  ['Intraday Scanner', '/intraday', ShieldCheck],
-  ['Swing Scanner', '/swing', LineChart],
   ['Intelligence Center', '/ai-insights', Target],
   ['Reports', '/reports', FileText],
 ] as const;

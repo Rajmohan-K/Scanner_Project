@@ -546,6 +546,82 @@ export function getWatchlistStreamUrl() {
   return `${getApiBaseUrl()}/api/watchlist/stream`;
 }
 
+export async function getAlgoWatchlistSignals() {
+  return liveGet<{ status: string; signals: any[] }>('/api/algo-watchlist/signals');
+}
+
+export async function getAlgoWatchlistHighProfitable() {
+  return liveGet<{ status: string; high_profitable: any[] }>('/api/algo-watchlist/high-profitable');
+}
+
+export async function getAlgoWatchlistEligible() {
+  return liveGet<{ status: string; eligible: any[] }>('/api/algo-watchlist/eligible');
+}
+
+export async function getAlgoWatchlistRejected() {
+  return liveGet<{ status: string; rejections: any[] }>('/api/algo-watchlist/rejected');
+}
+
+export async function getAlgoWatchlistExecutionQueue() {
+  return liveGet<{ status: string; queue: any[] }>('/api/algo-watchlist/execution-queue');
+}
+
+export async function sendToAlgo(symbol: string) {
+  const response = await client.post('/api/algo-watchlist/send-to-algo', { symbol });
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
+export async function clearAlgoQueue() {
+  const response = await client.post('/api/algo-watchlist/clear-queue', {});
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
+export function getAlgoWatchlistStreamUrl() {
+  return `${getApiBaseUrl()}/api/algo-watchlist/stream`;
+}
+
+export async function getAlgoWatchlistStatus() {
+  return liveGet<{
+    status: string;
+    running: boolean;
+    selected_source: string;
+    paper_mode: string;
+    real_trading: string;
+    engine_state: string;
+    active_signals_count: number;
+    rejections_count: number;
+    queue_count: number;
+  }>('/api/algo-watchlist/status');
+}
+
+export async function getAlgoWatchlistConfig() {
+  return liveGet<{ status: string; config: Record<string, string> }>('/api/algo-watchlist/config');
+}
+
+export async function saveAlgoWatchlistConfig(payload: Record<string, string>) {
+  const response = await client.post('/api/algo-watchlist/config', payload);
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
+export async function getAlgoWatchlistSources() {
+  return liveGet<{ status: string; sources: any[] }>('/api/algo-watchlist/sources');
+}
+
+export async function addAlgoCustomStock(symbol: string) {
+  const response = await client.post('/api/algo-watchlist/custom-stock', { symbol });
+  clearApiCache();
+  return response.data as { status: string; message: string; symbol: string };
+}
+
+export async function deleteAlgoCustomStock(symbol: string) {
+  const response = await client.delete(`/api/algo-watchlist/custom-stock/${encodeURIComponent(symbol)}`);
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
 export async function getAlertHistory(params: Record<string, string | number | undefined> = {}) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -1034,4 +1110,105 @@ export async function sendTelegramStockAlert(payload: Record<string, unknown>) {
   } catch (error: any) {
     throw new Error(error?.response?.data?.message || error?.message || 'Telegram alert failed');
   }
+}
+
+export type AlgoTradeSelection = {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  entry_price: number;
+  current_price: number;
+  stop_loss: number;
+  target: number;
+  confidence: number;
+  risk_reward: number;
+  profit_potential_pct: number;
+  volume_ratio: number;
+  selection_score: number;
+  strategy_reason: string;
+};
+
+export type AlgoStatusPayload = {
+  status: string;
+  paper_mode: boolean;
+  real_trading_enabled: boolean;
+  real_orders_disabled: boolean;
+  kotak_neo_connected: boolean;
+  selected_trade?: AlgoTradeSelection | null;
+  session?: Record<string, any> | null;
+  market_data: { connected: boolean; age_seconds: number; source: string };
+  portfolio?: Record<string, any>;
+  orders?: AlgoOrder[];
+  trades_today?: any[];
+  performance?: Record<string, any>;
+};
+
+export type AlgoOrder = {
+  order_id: string;
+  created_at: string;
+  symbol: string;
+  side: string;
+  quantity: number;
+  remaining_quantity: number;
+  entry_price: number;
+  current_price: number;
+  stop_loss: number;
+  trailing_stop_loss: number;
+  target: number;
+  status: string;
+  pnl: number;
+  exit_reason?: string;
+  confidence: number;
+  strategy_reason?: string;
+};
+
+export async function getAlgoStatus(): Promise<AlgoStatusPayload> {
+  return liveGet('/api/algo/status');
+}
+
+export async function startAlgoTrading(payload: {
+  capital: number;
+  max_trades: number;
+  max_loss: number;
+  risk_per_trade: number;
+  dummy_trading: boolean;
+  real_trading: boolean;
+}) {
+  const response = await client.post('/api/algo/start', payload);
+  return response.data;
+}
+
+export async function stopAlgoTrading(reason = 'Stopped by user') {
+  const response = await client.post('/api/algo/stop', { reason });
+  return response.data;
+}
+
+export async function getAlgoPortfolio() {
+  return liveGet('/api/algo/portfolio');
+}
+
+export async function getAlgoOrders(): Promise<{ orders: AlgoOrder[] }> {
+  return liveGet('/api/algo/orders');
+}
+
+export async function getAlgoTradesToday() {
+  return liveGet('/api/algo/trades/today');
+}
+
+export async function getAlgoPerformance() {
+  return liveGet('/api/algo/performance');
+}
+
+export async function placeDummyAlgoOrder(payload: Record<string, unknown>) {
+  const response = await client.post('/api/algo/dummy/place-order', payload);
+  return response.data;
+}
+
+export async function modifyDummyAlgoOrder(payload: Record<string, unknown>) {
+  const response = await client.post('/api/algo/dummy/modify-order', payload);
+  return response.data;
+}
+
+export async function cancelDummyAlgoOrder(orderId: string) {
+  const response = await client.post('/api/algo/dummy/cancel-order', { order_id: orderId });
+  return response.data;
 }

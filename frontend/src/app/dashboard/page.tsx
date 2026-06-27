@@ -3,7 +3,18 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import Link from 'next/link';
 import { Bell, Filter, Globe2, Grid2X2, List, Plus, Search } from 'lucide-react';
-import { addV20WatchlistItem, createV20Alert, getV20Dashboard, getV20Quote, normalizeStockRow, saveV20Filter, sendTelegramStockAlert } from '@/lib/api';
+import {
+  addV20WatchlistItem,
+  createV20Alert,
+  getV20Dashboard,
+  getV20Quote,
+  localStockSearch,
+  normalizeStockRow,
+  saveV20Filter,
+  searchStocks,
+  sendTelegramStockAlert,
+  type StockSearchResult,
+} from '@/lib/api';
 import { updateProgress } from '@/state/scanSlice';
 import { setTopStocks } from '@/state/dashboardSlice';
 import { RootState } from '@/state/store';
@@ -143,6 +154,9 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
   const [monitorInput, setMonitorInput] = useState('');
   const [monitorRows, setMonitorRows] = useState<MonitorRow[]>([]);
+  const [monitorSuggestions, setMonitorSuggestions] = useState<StockSearchResult[]>([]);
+  const [monitorSuggestionsLoading, setMonitorSuggestionsLoading] = useState(false);
+  const [showMonitorSuggestions, setShowMonitorSuggestions] = useState(false);
   const [growwRows, setGrowwRows] = useState<any[]>([]);
   const [growwUpdatedAt, setGrowwUpdatedAt] = useState('');
   const sentAlertKeys = React.useRef<Set<string>>(new Set());
@@ -163,6 +177,12 @@ export default function DashboardPage() {
 
   function parseSymbols(value: string) {
     return Array.from(new Set(value.split(/[\s,;]+/).map(normalizeSymbolToken).filter(Boolean)));
+  }
+
+  function monitorDisplaySymbol(stock: StockSearchResult) {
+    return stock.exchange === 'BSE'
+      ? (stock.bse_symbol || stock.symbol.replace(/\.BO$/, ''))
+      : (stock.nse_symbol || stock.symbol.replace(/\.NS$/, ''));
   }
 
   function roundPrice(value: unknown) {
@@ -443,6 +463,39 @@ export default function DashboardPage() {
     topStocksRef.current = topStocks;
   }, [topStocks]);
 
+  useEffect(() => {
+    const activeToken = monitorInput.split(',').pop()?.trim() || '';
+    if (!showMonitorSuggestions || activeToken.length < 2) {
+      setMonitorSuggestions([]);
+      setMonitorSuggestionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const localResults = localStockSearch(activeToken, 8);
+    setMonitorSuggestions(localResults);
+    setMonitorSuggestionsLoading(true);
+    searchStocks(activeToken, 8)
+      .then((payload) => {
+        if (cancelled) return;
+        const merged = [...(payload.results || [])];
+        for (const fallback of localResults) {
+          if (!merged.some((stock) => stock.symbol === fallback.symbol)) merged.push(fallback);
+        }
+        setMonitorSuggestions(merged.slice(0, 8));
+      })
+      .catch(() => {
+        if (!cancelled) setMonitorSuggestions(localResults);
+      })
+      .finally(() => {
+        if (!cancelled) setMonitorSuggestionsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [monitorInput, showMonitorSuggestions]);
+
 
 
   async function handleSaveFilter(name: string, filters: Record<string, unknown>) {
@@ -474,6 +527,14 @@ export default function DashboardPage() {
     setMonitorRows(result.rows);
     setMonitorInput(symbols.join(', '));
     toast?.push(`${result.added || symbols.length} symbol(s) added to live monitor`, 'success');
+  }
+
+  function selectMonitorSuggestion(stock: StockSearchResult) {
+    const parts = monitorInput.split(',');
+    parts[parts.length - 1] = ` ${monitorDisplaySymbol(stock)}`;
+    setMonitorInput(parts.join(',').trimStart());
+    setMonitorSuggestions([]);
+    setShowMonitorSuggestions(false);
   }
 
   const updateMonitor = useCallback((symbol: string, patch: Partial<MonitorRow>) => {
@@ -526,13 +587,57 @@ export default function DashboardPage() {
 
       <section className="dashboard-shell-grid">
         <div className="dashboard-main-column">
-          <TerminalPanel title="Live Stock Monitor" actions={<button className="link-button" type="button" onClick={() => refreshMonitorQuotes()}><Bell size={14} /> Refresh Quotes</button>}>
+          <TerminalPanel
+            className="live-stock-monitor-panel"
+            title="Live Stock Monitor"
+            actions={<button className="link-button" type="button" onClick={() => refreshMonitorQuotes()}><Bell size={14} /> Refresh</button>}
+          >
             <div className="live-monitor-entry">
-              <label className="field field--wide">
-                <span>Add Stocks To Monitor</span>
-                <input value={monitorInput} onBlur={() => setMonitorInput(parseSymbols(monitorInput).join(', '))} onChange={(event) => setMonitorInput(event.target.value)} placeholder="RELIANCE, TCS, INFY" />
-              </label>
-              <button className="btn-primary" type="button" onClick={addMonitorSymbols}><Plus size={15} /> Add Monitor</button>
+              <div className="live-monitor-search">
+                <label className="field">
+                  <span>Symbols</span>
+                  <input
+                    value={monitorInput}
+                    onFocus={() => setShowMonitorSuggestions(true)}
+                    onBlur={() => window.setTimeout(() => {
+                      setShowMonitorSuggestions(false);
+                      setMonitorInput(parseSymbols(monitorInput).join(', '));
+                    }, 140)}
+                    onChange={(event) => {
+                      setMonitorInput(event.target.value);
+                      setShowMonitorSuggestions(true);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') addMonitorSymbols();
+                      if (event.key === 'Escape') setShowMonitorSuggestions(false);
+                    }}
+                    placeholder="RELIANCE, TCS, INFY"
+                  />
+                </label>
+                {showMonitorSuggestions && (monitorSuggestionsLoading || monitorSuggestions.length > 0) && (
+                  <div className="watchlist-stock-suggestions live-monitor-suggestions">
+                    {monitorSuggestionsLoading && !monitorSuggestions.length && (
+                      <div className="watchlist-stock-suggestion is-muted">Searching...</div>
+                    )}
+                    {monitorSuggestions.map((stock) => (
+                      <button
+                        className="watchlist-stock-suggestion"
+                        key={`${stock.exchange}-${stock.symbol}`}
+                        type="button"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => selectMonitorSuggestion(stock)}
+                      >
+                        <span>
+                          <strong>{monitorDisplaySymbol(stock)}</strong>
+                          <small>{stock.exchange}</small>
+                        </span>
+                        <em>{stock.name}</em>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button className="btn-primary live-monitor-add" type="button" onClick={addMonitorSymbols}><Plus size={14} /> Add</button>
             </div>
             <div className="live-monitor-list">
               {monitorRows.length ? monitorRows.map((row) => (

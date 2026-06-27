@@ -9,6 +9,10 @@ import { RootState } from '@/state/store';
 import { useToast } from '@/components/layout/ToastProvider';
 import { DataTable, MetricTile, PageHero, ProgressLine, TerminalPanel } from '@/components/terminal/TerminalPrimitives';
 import { scanTypes } from '@/lib/terminalData';
+import { useSearchParams } from 'next/navigation';
+import IntradayScannerTab from '@/components/organisms/IntradayScannerTab';
+import SwingScannerTab from '@/components/organisms/SwingScannerTab';
+import PremarketTab from '@/components/organisms/PremarketTab';
 
 const defaultScanPresets: Record<string, Record<string, string>> = {
   Premarket: {
@@ -113,7 +117,23 @@ const defaultV4Filters = {
   notifyTelegram: false,
 };
 
-export default function ScanCenterPage() {
+function ScanCenterPageContent() {
+  const searchParams = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState<'universal' | 'intraday' | 'swing' | 'premarket'>('universal');
+
+  useEffect(() => {
+    if (tabParam === 'intraday') {
+      setActiveTab('intraday');
+    } else if (tabParam === 'swing') {
+      setActiveTab('swing');
+    } else if (tabParam === 'premarket') {
+      setActiveTab('premarket');
+    } else {
+      setActiveTab('universal');
+    }
+  }, [tabParam]);
+
   const dispatch = useDispatch();
   const toast = useToast();
   const scans = useSelector((state: RootState) => state.scan.scans);
@@ -428,7 +448,80 @@ export default function ScanCenterPage() {
 
   return (
     <main>
-      <PageHero
+      {/* Sub-navigation Tabs */}
+      <div style={{ display: 'flex', gap: '8px', padding: '16px 16px 0 16px', borderBottom: '1px solid var(--border)', marginBottom: '14px' }}>
+        <button
+          className={`btn-tab ${activeTab === 'universal' ? 'active' : ''}`}
+          onClick={() => setActiveTab('universal')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'universal' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'universal' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'universal' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Universal Scan Builder
+        </button>
+        <button
+          className={`btn-tab ${activeTab === 'intraday' ? 'active' : ''}`}
+          onClick={() => setActiveTab('intraday')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'intraday' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'intraday' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'intraday' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Intraday Scanner
+        </button>
+        <button
+          className={`btn-tab ${activeTab === 'swing' ? 'active' : ''}`}
+          onClick={() => setActiveTab('swing')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'swing' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'swing' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'swing' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Swing Scanner
+        </button>
+        <button
+          className={`btn-tab ${activeTab === 'premarket' ? 'active' : ''}`}
+          onClick={() => setActiveTab('premarket')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'premarket' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'premarket' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'premarket' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Premarket Pipeline
+        </button>
+      </div>
+
+      {activeTab === 'intraday' && <IntradayScannerTab />}
+      {activeTab === 'swing' && <SwingScannerTab />}
+      {activeTab === 'premarket' && <PremarketTab />}
+      {activeTab === 'universal' && (
+        <>
+          <PageHero
         eyebrow="Scan Center"
         title="Scanner V4"
         description="High-profit stock discovery with strict shortlist controls, validation pools, data-quality gates, and live backend task control."
@@ -669,6 +762,16 @@ export default function ScanCenterPage() {
         <DataTable columns={['Scan ID', 'Type', 'Status', 'Qualified / Scanned', 'Created']} rows={rows} />
         {loading && <p className="small">Loading scan queue...</p>}
       </TerminalPanel>
+      </>
+      )}
     </main>
+  );
+}
+
+export default function ScanCenterPage() {
+  return (
+    <React.Suspense fallback={<div style={{ padding: '40px', textAlign: 'center', color: 'var(--muted)', fontFamily: 'monospace' }}>Loading Scanner V4...</div>}>
+      <ScanCenterPageContent />
+    </React.Suspense>
   );
 }

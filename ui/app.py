@@ -60,6 +60,9 @@ from ui.watchlist_monitor import watchlist_monitor  # noqa: E402
 from data.market_data_provider import get_market_data_provider  # noqa: E402
 from utils.telegram import TelegramDeliveryError, send_telegram_messages, telegram_config_status  # noqa: E402
 from utils.logger import logger  # noqa: E402
+from backend import algo_store  # noqa: E402
+from backend.algo_engine import algo_trading_engine  # noqa: E402
+from backend.algo_watchlist_service import algo_watchlist_service  # noqa: E402
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -2487,6 +2490,429 @@ async def close_watchlist_signal(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "message": f"Signal for {normalized} closed successfully"})
 
 
+async def algo_watchlist_signals_api(request: web.Request) -> web.Response:
+    from backend import algo_store
+    rows = algo_store.list_rows("algo_watchlist_signals")
+    rows.sort(key=lambda x: x.get("algo_score", 0), reverse=True)
+    return web.json_response({"status": "ok", "signals": rows}, dumps=lambda val: json.dumps(val, default=str))
+
+
+async def algo_watchlist_rejected_api(request: web.Request) -> web.Response:
+    from backend import algo_store
+    rows = algo_store.list_rows("algo_watchlist_rejections")
+    rows.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    return web.json_response({"status": "ok", "rejections": rows}, dumps=lambda val: json.dumps(val, default=str))
+
+
+async def algo_watchlist_high_profitable_api(request: web.Request) -> web.Response:
+    from backend import algo_store
+    signals = algo_store.list_rows("algo_watchlist_signals")
+    rejections = algo_store.list_rows("algo_watchlist_rejections")
+    rejected_symbols = {r["symbol"] for r in rejections}
+    high_profitable = [s for s in signals if s["symbol"] not in rejected_symbols]
+    high_profitable.sort(key=lambda x: x.get("algo_score", 0), reverse=True)
+    return web.json_response({"status": "ok", "high_profitable": high_profitable}, dumps=lambda val: json.dumps(val, default=str))
+
+
+async def algo_watchlist_eligible_api(request: web.Request) -> web.Response:
+    from backend import algo_store
+    from backend.algo_engine import algo_trading_engine
+    signals = algo_store.list_rows("algo_watchlist_signals")
+    rejections = algo_store.list_rows("algo_watchlist_rejections")
+    rejected_symbols = {r["symbol"] for r in rejections}
+    high_profitable = [s for s in signals if s["symbol"] not in rejected_symbols]
+
+    algo_status = algo_trading_engine.status()
+    session = algo_status.get("session") or {}
+    running = algo_status.get("status") == "RUNNING"
+    capital = _number(session.get("capital", 100000.0))
+    available = _number(algo_status.get("portfolio", {}).get("available_funds", capital))
+    risk_per_trade = _number(session.get("risk_per_trade", 1.0))
+    max_trades = int(session.get("max_trades", 3))
+    max_loss = _number(session.get("max_loss", 2000.0))
+
+    portfolio = algo_status.get("portfolio") or {}
+    net_pnl = _number(portfolio.get("net_pnl", 0.0))
+    active_orders = algo_status.get("orders") or []
+    active_orders_count = sum(1 for o in active_orders if o.get("status") in {"PENDING", "OPEN", "PARTIAL_EXIT"})
+    daily_loss_limit_reached = net_pnl <= -abs(max_loss)
+    max_trades_reached = active_orders_count >= max_trades
+
+    from backend.algo_watchlist_service import algo_watchlist_service
+    cfg = algo_watchlist_service.get_config()
+    min_confidence = _number(cfg.get("min_confidence", 85.0))
+    min_algo_score = _number(cfg.get("min_algo_score", 80.0))
+
+    eligible = []
+    for hp in high_profitable:
+        entry_price = _number(hp["entry_price"])
+        stop_loss = _number(hp["stop_loss"])
+        target = _number(hp["target_1"])
+        confidence = _number(hp["confidence"])
+        score = _number(hp["algo_score"])
+
+        suggested_qty = 0
+        capital_required = 0.0
+        max_risk = 0.0
+        expected_profit = 0.0
+
+        if entry_price > 0 and stop_loss > 0:
+            per_share_risk = abs(entry_price - stop_loss)
+            if per_share_risk > 0:
+                suggested_qty = max(1, int((capital * risk_per_trade / 100.0) / per_share_risk))
+                max_qty_by_funds = int(available / entry_price) if entry_price > 0 else 0
+                suggested_qty = min(suggested_qty, max_qty_by_funds)
+                capital_required = round(suggested_qty * entry_price, 2)
+                max_risk = round(suggested_qty * per_share_risk, 2)
+                expected_profit = round(suggested_qty * abs(target - entry_price), 2)
+
+        algo_eligible = "YES" if suggested_qty > 0 else "NO"
+        auto_trade_allowed = "YES" if (algo_eligible == "YES" and running and not daily_loss_limit_reached and not max_trades_reached and confidence >= min_confidence and score >= min_algo_score) else "NO"
+
+        eligible.append({
+            "symbol": hp["symbol"],
+            "company_name": hp["company_name"],
+            "algo_eligibility": algo_eligible,
+            "eligible_reason": "High confidence trend confirmation & strong volume." if algo_eligible == "YES" else "Insufficient capital or invalid risk parameters.",
+            "capital_required": capital_required,
+            "suggested_quantity": suggested_qty,
+            "max_risk": max_risk,
+            "expected_profit": expected_profit,
+            "entry_trigger": entry_price,
+            "auto_trade_allowed": auto_trade_allowed,
+            "confidence": confidence,
+            "algo_score": score,
+            "side": hp["side"],
+            "stop_loss": stop_loss,
+            "target": target
+        })
+    return web.json_response({"status": "ok", "eligible": eligible}, dumps=lambda val: json.dumps(val, default=str))
+
+
+async def algo_watchlist_execution_queue_api(request: web.Request) -> web.Response:
+    from backend import algo_store
+    rows = algo_store.list_rows("algo_execution_queue")
+    rows.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    return web.json_response({"status": "ok", "queue": rows}, dumps=lambda val: json.dumps(val, default=str))
+
+
+async def send_to_algo_api(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    symbol = str(payload.get("symbol") or "").upper().strip()
+    if not symbol:
+        return web.json_response({"status": "error", "message": "Symbol is required"}, status=400)
+
+    from backend.algo_watchlist_service import algo_watchlist_service
+    result = await algo_watchlist_service.manual_send_to_algo(symbol)
+    if result.get("status") == "error":
+        return web.json_response(result, status=400)
+    return web.json_response(result)
+
+
+async def clear_algo_queue_api(request: web.Request) -> web.Response:
+    from backend import algo_store
+    import uuid
+    queued = algo_store.list_rows("algo_execution_queue")
+    count = 0
+    for q in queued:
+        if q.get("execution_status") == "PENDING":
+            algo_store.update("algo_execution_queue", "symbol", q["symbol"], {
+                "execution_status": "CANCELLED",
+                "updated_at": algo_store.now()
+            })
+            algo_store.insert("algo_signal_history", {
+                "history_id": uuid.uuid4().hex,
+                "symbol": q["symbol"],
+                "side": q["side"],
+                "entry_price": q["entry_price"],
+                "stop_loss": q["stop_loss"],
+                "target": q["target"],
+                "confidence": q["confidence"],
+                "algo_score": q["algo_score"],
+                "status": "CANCELLED",
+                "reason": "Emergency clear queue action triggered by user.",
+                "created_at": algo_store.now()
+            })
+            count += 1
+    
+    # Notify Telegram about clear queue if enabled
+    from backend.algo_watchlist_service import algo_watchlist_service
+    cfg = algo_watchlist_service.get_config()
+    if cfg.get("telegram_notifications") == "ON":
+        from ui.watchlist_monitor import watchlist_monitor
+        bot_token = str(watchlist_monitor.settings.get("telegram_bot_token") or "").strip()
+        chat_id = str(watchlist_monitor.settings.get("telegram_chat_id") or "").strip()
+        if bot_token:
+            os.environ["TELEGRAM_BOT_TOKEN"] = bot_token
+        if chat_id:
+            os.environ["TELEGRAM_CHAT_IDS"] = chat_id
+        msg = f"🚨 *[EMERGENCY STOP]*\nExecution queue cleared by user. Cancelled {count} pending queue orders."
+        try:
+            await asyncio.to_thread(send_telegram_messages, "Watchlist", msg)
+        except Exception:
+            pass
+
+    return web.json_response({"status": "ok", "message": f"Cancelled {count} pending queue orders."})
+
+
+async def algo_watchlist_status_api(request: web.Request) -> web.Response:
+    from backend.algo_watchlist_service import algo_watchlist_service
+    from backend import algo_store
+    cfg = algo_watchlist_service.get_config()
+    from backend.algo_engine import algo_trading_engine
+    engine_status = algo_trading_engine.status()
+    
+    status_payload = {
+        "status": "ok",
+        "running": algo_watchlist_service._active,
+        "selected_source": cfg.get("selected_source", "ALL"),
+        "paper_mode": cfg.get("paper_mode", "ON"),
+        "real_trading": cfg.get("real_trading", "OFF"),
+        "engine_state": engine_status.get("status", "IDLE"),
+        "active_signals_count": len(algo_store.list_rows("algo_watchlist_signals")),
+        "rejections_count": len(algo_store.list_rows("algo_watchlist_rejections")),
+        "queue_count": len(algo_store.list_rows("algo_execution_queue"))
+    }
+    return web.json_response(status_payload)
+
+
+async def algo_watchlist_config_get(request: web.Request) -> web.Response:
+    from backend.algo_watchlist_service import algo_watchlist_service
+    cfg = algo_watchlist_service.get_config()
+    return web.json_response({"status": "ok", "config": cfg})
+
+
+async def algo_watchlist_config_post(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    from backend import algo_store
+    for k, v in payload.items():
+        existing = algo_store.get_one("algo_watchlist_config", "key", k)
+        if existing:
+            algo_store.update("algo_watchlist_config", "key", k, {"value": str(v)})
+        else:
+            algo_store.insert("algo_watchlist_config", {"key": k, "value": str(v)})
+    return web.json_response({"status": "ok", "message": "Configuration updated successfully"})
+
+
+async def algo_watchlist_sources_api(request: web.Request) -> web.Response:
+    from backend import algo_store
+    custom_rows = algo_store.list_rows("algo_watchlist_custom_stocks")
+    custom_active = [r for r in custom_rows if r.get("monitoring_status") == "ACTIVE"]
+    
+    sources = [
+        {"id": "ALL", "name": "All Enabled Sources", "count": 0},
+        {"id": "custom", "name": "Custom Stocks", "count": len(custom_active)},
+        {"id": "groww", "name": "Groww Source Stocks", "count": len(stock_registry.groww_active_intraday_stocks)},
+        {"id": "auto_scanned", "name": "Auto-Scanned Stocks", "count": len(stock_registry.active_suggestions)},
+        {"id": "high_profitable", "name": "High-Profitable Stocks", "count": 0},
+        {"id": "prev_algo", "name": "Previous Algo Candidates", "count": len(algo_store.list_rows("algo_signal_history"))},
+        {"id": "premarket", "name": "Premarket Analysis Stocks", "count": 0}
+    ]
+    return web.json_response({"status": "ok", "sources": sources})
+
+
+async def algo_watchlist_custom_stock_post(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    symbol = str(payload.get("symbol") or "").upper().strip()
+    if not symbol:
+        return web.json_response({"status": "error", "message": "Symbol is required"}, status=400)
+    
+    normalized = normalize_stock_symbol(symbol)
+    if not normalized:
+        return web.json_response({"status": "error", "message": f"Invalid stock symbol {symbol}"}, status=400)
+    
+    # Auto resolve suffix
+    if not (symbol.endswith(".NS") or symbol.endswith(".BO")):
+        from ui.stock_registry import stock_registry
+        resolved = stock_registry.autocomplete(normalized)
+        if resolved:
+            first = resolved[0]
+            symbol = first.get("symbol") or f"{normalized}.NS"
+        else:
+            symbol = f"{normalized}.NS"
+    else:
+        symbol = symbol
+        
+    from backend import algo_store
+    existing = algo_store.get_one("algo_watchlist_custom_stocks", "symbol", symbol)
+    from ui.stock_data_service import humanize_symbol
+    if existing:
+        algo_store.update("algo_watchlist_custom_stocks", "symbol", symbol, {
+            "monitoring_status": "ACTIVE"
+        })
+    else:
+        algo_store.insert("algo_watchlist_custom_stocks", {
+            "symbol": symbol,
+            "company_name": humanize_symbol(symbol),
+            "source": "custom",
+            "monitoring_status": "ACTIVE",
+            "created_at": algo_store.now()
+        })
+    stock_data_service.tracked_symbols.add(symbol)
+    return web.json_response({"status": "ok", "message": f"Successfully added {symbol} to ALGO custom watch", "symbol": symbol})
+
+
+async def algo_watchlist_custom_stock_delete(request: web.Request) -> web.Response:
+    symbol = request.match_info.get("symbol") or ""
+    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return web.json_response({"status": "error", "message": "Symbol parameter is required"}, status=400)
+        
+    from backend import algo_store
+    existing = algo_store.get_one("algo_watchlist_custom_stocks", "symbol", symbol)
+    if not existing:
+        for row in algo_store.list_rows("algo_watchlist_custom_stocks"):
+            if row["symbol"].startswith(symbol):
+                symbol = row["symbol"]
+                existing = row
+                break
+                
+    if not existing:
+        return web.json_response({"status": "error", "message": f"Symbol {symbol} not found in custom watch"}, status=404)
+        
+    with connect() as conn:
+        conn.execute("DELETE FROM algo_watchlist_custom_stocks WHERE symbol = ?", (symbol,))
+        
+    mock = algo_store._mock_table("algo_watchlist_custom_stocks")
+    if mock is not None:
+        for idx, row in enumerate(mock):
+            if row["symbol"] == symbol:
+                mock.pop(idx)
+                break
+                
+    stock_data_service.tracked_symbols.discard(symbol)
+    return web.json_response({"status": "ok", "message": f"Successfully removed {symbol} from ALGO custom watch"})
+
+
+async def algo_watchlist_stream(request: web.Request) -> web.StreamResponse:
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await response.prepare(request)
+    last_signature = ""
+    try:
+        from backend import algo_store
+        from backend.algo_engine import algo_trading_engine
+        from backend.algo_watchlist_service import algo_watchlist_service
+
+        for _ in range(1800):
+            signals = algo_store.list_rows("algo_watchlist_signals")
+            rejections = algo_store.list_rows("algo_watchlist_rejections")
+            queue = algo_store.list_rows("algo_execution_queue")
+            custom_stocks = algo_store.list_rows("algo_watchlist_custom_stocks")
+
+            signals.sort(key=lambda x: x.get("algo_score", 0), reverse=True)
+            rejections.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+            queue.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+
+            rejected_symbols = {r["symbol"] for r in rejections}
+            high_profitable = [s for s in signals if s["symbol"] not in rejected_symbols]
+
+            eligible = []
+            algo_status = algo_trading_engine.status()
+            session = algo_status.get("session") or {}
+            running = algo_status.get("status") == "RUNNING"
+            capital = _number(session.get("capital", 100000.0))
+            available = _number(algo_status.get("portfolio", {}).get("available_funds", capital))
+            risk_per_trade = _number(session.get("risk_per_trade", 1.0))
+            max_trades = int(session.get("max_trades", 3))
+            max_loss = _number(session.get("max_loss", 2000.0))
+
+            portfolio = algo_status.get("portfolio") or {}
+            net_pnl = _number(portfolio.get("net_pnl", 0.0))
+            active_orders = algo_status.get("orders") or []
+            active_orders_count = sum(1 for o in active_orders if o.get("status") in {"PENDING", "OPEN", "PARTIAL_EXIT"})
+            daily_loss_limit_reached = net_pnl <= -abs(max_loss)
+            max_trades_reached = active_orders_count >= max_trades
+
+            cfg = algo_watchlist_service.get_config()
+            min_confidence = _number(cfg.get("min_confidence", 85.0))
+            min_algo_score = _number(cfg.get("min_algo_score", 80.0))
+
+            for hp in high_profitable:
+                entry_price = _number(hp["entry_price"])
+                stop_loss = _number(hp["stop_loss"])
+                target = _number(hp["target_1"])
+                confidence = _number(hp["confidence"])
+                score = _number(hp["algo_score"])
+
+                suggested_qty = 0
+                capital_required = 0.0
+                max_risk = 0.0
+                expected_profit = 0.0
+
+                if entry_price > 0 and stop_loss > 0:
+                    per_share_risk = abs(entry_price - stop_loss)
+                    if per_share_risk > 0:
+                        suggested_qty = max(1, int((capital * risk_per_trade / 100.0) / per_share_risk))
+                        max_qty_by_funds = int(available / entry_price) if entry_price > 0 else 0
+                        suggested_qty = min(suggested_qty, max_qty_by_funds)
+                        capital_required = round(suggested_qty * entry_price, 2)
+                        max_risk = round(suggested_qty * per_share_risk, 2)
+                        expected_profit = round(suggested_qty * abs(target - entry_price), 2)
+
+                algo_eligible = "YES" if suggested_qty > 0 else "NO"
+                auto_trade_allowed = "YES" if (algo_eligible == "YES" and running and not daily_loss_limit_reached and not max_trades_reached and confidence >= min_confidence and score >= min_algo_score) else "NO"
+
+                eligible.append({
+                    "symbol": hp["symbol"],
+                    "company_name": hp["company_name"],
+                    "algo_eligibility": algo_eligible,
+                    "eligible_reason": "High confidence trend confirmation & strong volume." if algo_eligible == "YES" else "Insufficient capital or invalid risk parameters.",
+                    "capital_required": capital_required,
+                    "suggested_quantity": suggested_qty,
+                    "max_risk": max_risk,
+                    "expected_profit": expected_profit,
+                    "entry_trigger": entry_price,
+                    "auto_trade_allowed": auto_trade_allowed,
+                    "confidence": confidence,
+                    "algo_score": score,
+                    "side": hp["side"],
+                    "stop_loss": stop_loss,
+                    "target": target
+                })
+
+            payload = {
+                "status": "ok",
+                "signals": signals,
+                "rejections": rejections,
+                "high_profitable": high_profitable,
+                "eligible": eligible,
+                "queue": queue,
+                "custom_stocks": custom_stocks,
+                "algo_status": algo_status,
+                "algo_config": cfg,
+                "updated_at": datetime.now().isoformat(timespec="seconds")
+            }
+            signature = json.dumps(payload, sort_keys=True, default=str)
+            if signature != last_signature:
+                await response.write(await encode_sse("ALGO_WATCHLIST_UPDATED", payload))
+                last_signature = signature
+            await response.write(await encode_sse("HEARTBEAT", {"updated_at": datetime.now().isoformat(timespec="seconds")}))
+            await asyncio.sleep(1)
+    except (asyncio.CancelledError, ClientConnectionResetError, ConnectionResetError):
+        logger.debug("Algo watchlist stream client disconnected")
+    except Exception as exc:
+        logger.warning(f"Algo watchlist stream ended: {exc}")
+    return response
+
+
 async def watchlist_status(_: web.Request) -> web.Response:
     return web.json_response(
         {"status": "ok", "monitor": watchlist_monitor.status, "count": len(watchlist_monitor.items)},
@@ -2994,6 +3420,78 @@ async def realtime_snapshot_warmer(app: web.Application):
             pass
 
 
+async def algo_status(request: web.Request) -> web.Response:
+    return web.json_response(algo_trading_engine.status(), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def algo_start(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+        result = await algo_trading_engine.start(payload if isinstance(payload, dict) else {})
+        return web.json_response(result, dumps=lambda value: json.dumps(value, default=str))
+    except (ValueError, PermissionError) as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        logger.error(f"Unable to start paper algo: {exc}", exc_info=True)
+        return web.json_response({"status": "error", "message": "Unable to start paper algo safely"}, status=500)
+
+
+async def algo_stop(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    reason = str((payload or {}).get("reason") or "Stopped by user")
+    return web.json_response(await algo_trading_engine.stop(reason), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def algo_portfolio(request: web.Request) -> web.Response:
+    return web.json_response(algo_trading_engine.portfolio(), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def algo_orders(request: web.Request) -> web.Response:
+    session = algo_trading_engine.status().get("session") or {}
+    rows = algo_store.order_rows(session.get("session_id"))
+    return web.json_response({"orders": rows}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def algo_trades_today(request: web.Request) -> web.Response:
+    return web.json_response({"trades": algo_store.trade_rows(today_only=True)}, dumps=lambda value: json.dumps(value, default=str))
+
+
+async def algo_performance(request: web.Request) -> web.Response:
+    return web.json_response(algo_trading_engine.performance(), dumps=lambda value: json.dumps(value, default=str))
+
+
+async def algo_dummy_place_order(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(algo_trading_engine.place_dummy_order(await request.json()), dumps=lambda value: json.dumps(value, default=str))
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def algo_dummy_modify_order(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(algo_trading_engine.modify_dummy_order(await request.json()), dumps=lambda value: json.dumps(value, default=str))
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def algo_dummy_cancel_order(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(algo_trading_engine.cancel_dummy_order(await request.json()), dumps=lambda value: json.dumps(value, default=str))
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def algo_trading_worker(app: web.Application):
+    await asyncio.to_thread(algo_store.ensure_schema)
+    try:
+        yield
+    finally:
+        await algo_trading_engine.shutdown()
+
+
 async def v30_backfill_worker(app: web.Application):
     task = asyncio.create_task(asyncio.to_thread(v30_store.backfill_saved_scans, 500))
     try:
@@ -3050,6 +3548,14 @@ async def watchlist_monitor_worker(app: web.Application):
         await watchlist_monitor.stop()
 
 
+async def algo_watchlist_worker(app: web.Application):
+    await algo_watchlist_service.start()
+    try:
+        yield
+    finally:
+        await algo_watchlist_service.stop()
+
+
 def create_app() -> web.Application:
     @web.middleware
     async def cors_middleware(request: web.Request, handler):
@@ -3069,12 +3575,13 @@ def create_app() -> web.Application:
     app.cleanup_ctx.append(realtime_snapshot_warmer)
     app.cleanup_ctx.append(stock_data_worker)
     app.cleanup_ctx.append(watchlist_monitor_worker)
+    app.cleanup_ctx.append(algo_watchlist_worker)
+    app.cleanup_ctx.append(algo_trading_worker)
     # Serve static assets (CSS, JS, images) from ui/static/
     app.router.add_static('/static/', path=str(BASE_DIR / 'static'), show_index=False)
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
     app.router.add_get("/api/health", health)
-    app.router.add_get("/api/provider/status", provider_status)
     app.router.add_get("/api/market/snapshot", market_snapshot)
     app.router.add_get("/api/market/missing", market_missing)
     app.router.add_get("/api/scan/live", scan_live)
@@ -3119,6 +3626,22 @@ def create_app() -> web.Application:
     app.router.add_put("/api/alerts/settings", alert_settings_api)
     app.router.add_post("/api/scan", scan)
     app.router.add_post("/api/scan/start", start_scan)
+
+    # Algo Watchlist Routes
+    app.router.add_get("/api/algo-watchlist/status", algo_watchlist_status_api)
+    app.router.add_get("/api/algo-watchlist/config", algo_watchlist_config_get)
+    app.router.add_post("/api/algo-watchlist/config", algo_watchlist_config_post)
+    app.router.add_get("/api/algo-watchlist/sources", algo_watchlist_sources_api)
+    app.router.add_post("/api/algo-watchlist/custom-stock", algo_watchlist_custom_stock_post)
+    app.router.add_delete("/api/algo-watchlist/custom-stock/{symbol}", algo_watchlist_custom_stock_delete)
+    app.router.add_get("/api/algo-watchlist/signals", algo_watchlist_signals_api)
+    app.router.add_get("/api/algo-watchlist/high-profitable", algo_watchlist_high_profitable_api)
+    app.router.add_get("/api/algo-watchlist/eligible", algo_watchlist_eligible_api)
+    app.router.add_get("/api/algo-watchlist/rejected", algo_watchlist_rejected_api)
+    app.router.add_get("/api/algo-watchlist/execution-queue", algo_watchlist_execution_queue_api)
+    app.router.add_post("/api/algo-watchlist/send-to-algo", send_to_algo_api)
+    app.router.add_post("/api/algo-watchlist/clear-queue", clear_algo_queue_api)
+    app.router.add_get("/api/algo-watchlist/stream", algo_watchlist_stream)
     app.router.add_post("/api/scans/{family}/run", run_dedicated_scan)
     app.router.add_get("/api/scans/{family}/latest", dedicated_scan_latest)
     app.router.add_get("/api/scans/{family}/{scan_id}/results", dedicated_scan_results)
@@ -3195,6 +3718,16 @@ def create_app() -> web.Application:
     app.router.add_post("/api/ai/copilot/query", ai_copilot_query)
     app.router.add_post("/api/ai/insights/refresh", ai_insights_refresh)
     app.router.add_post("/api/ai/alerts/create", ai_alert_create)
+    app.router.add_get("/api/algo/status", algo_status)
+    app.router.add_post("/api/algo/start", algo_start)
+    app.router.add_post("/api/algo/stop", algo_stop)
+    app.router.add_get("/api/algo/portfolio", algo_portfolio)
+    app.router.add_get("/api/algo/orders", algo_orders)
+    app.router.add_get("/api/algo/trades/today", algo_trades_today)
+    app.router.add_get("/api/algo/performance", algo_performance)
+    app.router.add_post("/api/algo/dummy/place-order", algo_dummy_place_order)
+    app.router.add_post("/api/algo/dummy/modify-order", algo_dummy_modify_order)
+    app.router.add_post("/api/algo/dummy/cancel-order", algo_dummy_cancel_order)
     return app
 
 
