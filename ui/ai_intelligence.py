@@ -286,9 +286,9 @@ def copilot_query(query: str) -> dict[str, Any]:
     if not text:
         return {"answer": "Please ask about a stock, scanner, watchlist, risk, or trade plan.", "data": None}
     upper_tokens = [part.strip("?,. ").upper() for part in text.split()]
-    symbol = next((token for token in upper_tokens if token.endswith(".NS") or len(token) <= 12 and token.isalpha()), "")
+    symbol = next((token for token in upper_tokens if token.endswith(".NS") or token.endswith(".BO") or len(token) <= 12 and token.isalpha()), "")
     if symbol:
-        if not symbol.endswith(".NS"):
+        if not (symbol.endswith(".NS") or symbol.endswith(".BO")):
             symbol = f"{symbol}.NS"
         insight = generate_stock_insight(symbol, "copilot")
         answer = insight["summary"]

@@ -58,6 +58,7 @@ const sectionFields: Record<string, Array<{ key: string; label: string; type: 'c
   'Notification Configuration': [
     { key: 'notify_telegram', label: 'Telegram Alerts', type: 'checkbox', value: false },
     { key: 'desktop_alerts_enabled', label: 'Desktop Alerts', type: 'checkbox', value: false },
+    { key: 'browser_alerts_enabled', label: 'Browser Notifications', type: 'checkbox', value: true },
     { key: 'sound_enabled', label: 'Alert Sound', type: 'checkbox', value: false },
     { key: 'telegram_bot_token', label: 'Telegram Bot Token', type: 'text', value: '' },
     { key: 'telegram_chat_id', label: 'Telegram Chat ID', type: 'text', value: '' },
@@ -65,14 +66,22 @@ const sectionFields: Record<string, Array<{ key: string; label: string; type: 'c
     { key: 'breakout_volume_multiplier', label: 'Breakout Volume Multiplier', type: 'number', value: 1.5 },
     { key: 'consecutive_candle_count', label: 'Consecutive Candle Count', type: 'number', value: 3 },
     { key: 'price_move_pct_threshold', label: 'Price Move % Threshold', type: 'number', value: 2 },
+    { key: 'price_surge_pct', label: 'Price Surge % Threshold', type: 'number', value: 0.75 },
     { key: 'cooldown_seconds', label: 'Duplicate Cooldown Seconds', type: 'number', value: 900 },
-    { key: 'monitoring_interval_seconds', label: 'Monitoring Interval Seconds', type: 'number', value: 10 },
+    { key: 'monitoring_interval_seconds', label: 'Monitoring Interval Seconds', type: 'number', value: 1 },
     { key: 'telegram_category', label: 'Telegram Category', type: 'text', value: 'Premarket' },
     { key: 'notify_scan_complete', label: 'Notify On Scan Complete', type: 'checkbox', value: true },
+    { key: 'volume_alerts_enabled', label: 'Volume Surge Alerts', type: 'checkbox', value: true },
+    { key: 'target_alerts_enabled', label: 'Target Alerts', type: 'checkbox', value: true },
+    { key: 'stop_loss_alerts_enabled', label: 'Stop Loss Alerts', type: 'checkbox', value: true },
+    { key: 'buy_alerts_enabled', label: 'Buy Alerts', type: 'checkbox', value: true },
+    { key: 'sell_alerts_enabled', label: 'Sell Alerts', type: 'checkbox', value: true },
   ],
   'Data Feed Configuration': [
     { key: 'market_refresh_seconds', label: 'Market Refresh Seconds', type: 'number', value: 5 },
-    { key: 'feed_provider', label: 'Feed Provider', type: 'select', options: ['yfinance', 'cached-yfinance'], value: 'yfinance' },
+    { key: 'feed_provider', label: 'Feed Provider', type: 'select', options: ['groww', 'yfinance', 'cached-yfinance'], value: 'yfinance' },
+    { key: 'groww_api_key', label: 'Groww API Key / Token', type: 'text', value: '' },
+    { key: 'groww_api_secret', label: 'Groww API Secret', type: 'text', value: '' },
     { key: 'ignore_dead_proxy', label: 'Ignore Dead Local Proxy', type: 'checkbox', value: true },
   ],
   'API Configuration': [
@@ -148,6 +157,7 @@ export default function SettingsPage() {
       await saveSettings(settings);
       await saveAlertSettings({
         desktop_enabled: Boolean(settings.desktop_alerts_enabled),
+        browser_alerts_enabled: Boolean(settings.browser_alerts_enabled),
         sound_enabled: Boolean(settings.sound_enabled),
         telegram_enabled: Boolean(settings.notify_telegram),
         telegram_bot_token: settings.telegram_bot_token,
@@ -156,8 +166,14 @@ export default function SettingsPage() {
         breakout_volume_multiplier: Number(settings.breakout_volume_multiplier),
         consecutive_candle_count: Number(settings.consecutive_candle_count),
         price_move_pct_threshold: Number(settings.price_move_pct_threshold),
+        price_surge_pct: Number(settings.price_surge_pct),
         cooldown_seconds: Number(settings.cooldown_seconds),
         monitoring_interval_seconds: Number(settings.monitoring_interval_seconds),
+        volume_alerts_enabled: Boolean(settings.volume_alerts_enabled),
+        target_alerts_enabled: Boolean(settings.target_alerts_enabled),
+        stop_loss_alerts_enabled: Boolean(settings.stop_loss_alerts_enabled),
+        buy_alerts_enabled: Boolean(settings.buy_alerts_enabled),
+        sell_alerts_enabled: Boolean(settings.sell_alerts_enabled),
       });
       dispatch(setSettings(settings));
       setLastSavedSettings(settings);

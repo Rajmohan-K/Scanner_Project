@@ -123,7 +123,38 @@ export type StockSearchResult = {
   symbol: string;
   name: string;
   exchange: string;
+  nse_symbol?: string;
+  bse_symbol?: string;
 };
+
+export const localStockFallbacks: StockSearchResult[] = [
+  { symbol: 'RELIANCE.NS', name: 'Reliance Industries', exchange: 'NSE', nse_symbol: 'RELIANCE' },
+  { symbol: 'TCS.NS', name: 'Tata Consultancy Services', exchange: 'NSE', nse_symbol: 'TCS' },
+  { symbol: 'INFY.NS', name: 'Infosys', exchange: 'NSE', nse_symbol: 'INFY' },
+  { symbol: 'HDFCBANK.NS', name: 'HDFC Bank', exchange: 'NSE', nse_symbol: 'HDFCBANK' },
+  { symbol: 'ICICIBANK.NS', name: 'ICICI Bank', exchange: 'NSE', nse_symbol: 'ICICIBANK' },
+  { symbol: 'WIPRO.NS', name: 'Wipro', exchange: 'NSE', nse_symbol: 'WIPRO' },
+  { symbol: 'SBIN.NS', name: 'State Bank of India', exchange: 'NSE', nse_symbol: 'SBIN' },
+  { symbol: 'AXISBANK.NS', name: 'Axis Bank', exchange: 'NSE', nse_symbol: 'AXISBANK' },
+  { symbol: 'BAJFINANCE.NS', name: 'Bajaj Finance', exchange: 'NSE', nse_symbol: 'BAJFINANCE' },
+  { symbol: 'BHARTIARTL.NS', name: 'Bharti Airtel', exchange: 'NSE', nse_symbol: 'BHARTIARTL' },
+  { symbol: 'ITC.NS', name: 'ITC', exchange: 'NSE', nse_symbol: 'ITC' },
+  { symbol: 'LT.NS', name: 'Larsen & Toubro', exchange: 'NSE', nse_symbol: 'LT' },
+  { symbol: 'MARUTI.NS', name: 'Maruti Suzuki', exchange: 'NSE', nse_symbol: 'MARUTI' },
+  { symbol: 'TATAMOTORS.NS', name: 'Tata Motors', exchange: 'NSE', nse_symbol: 'TATAMOTORS' },
+  { symbol: 'OLAELEC.NS', name: 'Ola Electric Mobility', exchange: 'NSE', nse_symbol: 'OLAELEC' },
+  { symbol: 'AAVAS.NS', name: 'Aavas Financiers', exchange: 'NSE', nse_symbol: 'AAVAS' },
+  { symbol: 'ANANDRATHI.NS', name: 'Anand Rathi Wealth', exchange: 'NSE', nse_symbol: 'ANANDRATHI' },
+  { symbol: 'HAPPSTMNDS.NS', name: 'Happiest Minds Technologies', exchange: 'NSE', nse_symbol: 'HAPPSTMNDS' },
+];
+
+export function localStockSearch(query: string, limit = 8) {
+  const needle = query.trim().toLowerCase();
+  if (needle.length < 2) return [];
+  return localStockFallbacks
+    .filter((stock) => `${stock.symbol} ${stock.name} ${stock.nse_symbol || ''} ${stock.bse_symbol || ''}`.toLowerCase().includes(needle))
+    .slice(0, limit);
+}
 
 export type StockQuotePayload = {
   status: string;
@@ -296,8 +327,14 @@ export function getStockStreamUrl(symbol: string) {
 
 export type WatchlistSnapshot = {
   symbol?: string;
+  sector?: string;
+  isin?: string;
   company_name?: string;
   exchange?: string;
+  nse_symbol?: string;
+  bse_symbol?: string;
+  active_quote_source?: string;
+  fallback_reason?: string;
   current_price?: number;
   price_change_pct?: number;
   volume_spike?: number;
@@ -308,6 +345,18 @@ export type WatchlistSnapshot = {
   current_status?: string;
   intraday_signal?: string;
   swing_signal?: string;
+  suggested_at?: string;
+  suggested_entry_price?: number;
+  current_gain_loss_percent?: number;
+  max_gain_after_suggestion?: number;
+  max_loss_after_suggestion?: number;
+  time_since_suggestion?: string;
+  suggestion_status?: string;
+  quality_label?: string;
+  quality_score?: number;
+  expected_profit_percent?: number;
+  expected_loss_percent?: number;
+  risk_reward_ratio?: number;
   risk?: string;
   confidence?: number;
   last_alert?: string;
@@ -340,13 +389,34 @@ export type WatchlistSnapshot = {
   trade_reason?: string;
   risk_percent?: number;
   reason?: string;
+  suggested_time?: string;
+  vwap?: number;
+  ema20?: number;
   stale?: boolean;
+  direction?: string;
+  is_high_alert?: boolean;
+  distance_from_intraday_high_percent?: number;
+  custom_price_alert?: number;
+  dataFreshness?: string;
+  initialStopLoss?: number | null;
+  trailingStop?: number | null;
+  trailingActivated?: boolean;
+  highestPriceSinceEntry?: number | null;
+  lowestPriceSinceEntry?: number | null;
+  trailingStatus?: string;
+  targetHitStatus?: string;
+  stopLossHitStatus?: string;
+  outcome?: string;
 };
 
 export type WatchlistItem = {
   symbol: string;
   company_name?: string;
   exchange?: string;
+  nse_symbol?: string;
+  bse_symbol?: string;
+  active_quote_source?: string;
+  fallback_reason?: string;
   monitoring_enabled?: boolean;
   alerts_enabled?: boolean;
   telegram_enabled?: boolean;
@@ -359,6 +429,13 @@ export type WatchlistItem = {
   last_checked?: string;
   last_alert?: string;
   snapshot?: WatchlistSnapshot;
+  source?: string;
+  added_from?: string;
+  first_seen_at?: string;
+  last_updated_at?: string;
+  active_status?: string;
+  custom_price_alert?: number;
+  isin?: string;
 };
 
 export type AlertSettings = {
@@ -393,6 +470,17 @@ export type AlertSettings = {
   half_percent_move_threshold?: number;
   gtt_plan_enabled?: boolean;
   future_auto_trade_enabled?: boolean;
+  avoid_negative_alerts?: boolean;
+  min_profit_pct?: number;
+  groww_source_enabled?: boolean;
+  browser_alerts_enabled?: boolean;
+  volume_alerts_enabled?: boolean;
+  target_alerts_enabled?: boolean;
+  stop_loss_alerts_enabled?: boolean;
+  buy_alerts_enabled?: boolean;
+  sell_alerts_enabled?: boolean;
+  auto_add_candidates?: boolean;
+  price_surge_pct?: number;
 };
 
 export type AlertHistoryRecord = {
@@ -458,6 +546,82 @@ export function getWatchlistStreamUrl() {
   return `${getApiBaseUrl()}/api/watchlist/stream`;
 }
 
+export async function getAlgoWatchlistSignals() {
+  return liveGet<{ status: string; signals: any[] }>('/api/algo-watchlist/signals');
+}
+
+export async function getAlgoWatchlistHighProfitable() {
+  return liveGet<{ status: string; high_profitable: any[] }>('/api/algo-watchlist/high-profitable');
+}
+
+export async function getAlgoWatchlistEligible() {
+  return liveGet<{ status: string; eligible: any[] }>('/api/algo-watchlist/eligible');
+}
+
+export async function getAlgoWatchlistRejected() {
+  return liveGet<{ status: string; rejections: any[] }>('/api/algo-watchlist/rejected');
+}
+
+export async function getAlgoWatchlistExecutionQueue() {
+  return liveGet<{ status: string; queue: any[] }>('/api/algo-watchlist/execution-queue');
+}
+
+export async function sendToAlgo(symbol: string) {
+  const response = await client.post('/api/algo-watchlist/send-to-algo', { symbol });
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
+export async function clearAlgoQueue() {
+  const response = await client.post('/api/algo-watchlist/clear-queue', {});
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
+export function getAlgoWatchlistStreamUrl() {
+  return `${getApiBaseUrl()}/api/algo-watchlist/stream`;
+}
+
+export async function getAlgoWatchlistStatus() {
+  return liveGet<{
+    status: string;
+    running: boolean;
+    selected_source: string;
+    paper_mode: string;
+    real_trading: string;
+    engine_state: string;
+    active_signals_count: number;
+    rejections_count: number;
+    queue_count: number;
+  }>('/api/algo-watchlist/status');
+}
+
+export async function getAlgoWatchlistConfig() {
+  return liveGet<{ status: string; config: Record<string, string> }>('/api/algo-watchlist/config');
+}
+
+export async function saveAlgoWatchlistConfig(payload: Record<string, string>) {
+  const response = await client.post('/api/algo-watchlist/config', payload);
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
+export async function getAlgoWatchlistSources() {
+  return liveGet<{ status: string; sources: any[] }>('/api/algo-watchlist/sources');
+}
+
+export async function addAlgoCustomStock(symbol: string) {
+  const response = await client.post('/api/algo-watchlist/custom-stock', { symbol });
+  clearApiCache();
+  return response.data as { status: string; message: string; symbol: string };
+}
+
+export async function deleteAlgoCustomStock(symbol: string) {
+  const response = await client.delete(`/api/algo-watchlist/custom-stock/${encodeURIComponent(symbol)}`);
+  clearApiCache();
+  return response.data as { status: string; message: string };
+}
+
 export async function getAlertHistory(params: Record<string, string | number | undefined> = {}) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -472,6 +636,16 @@ export async function getWatchlistHistory(params: Record<string, string | number
     if (value !== undefined && value !== '') query.set(key, String(value));
   });
   return liveGet<{ status: string; alerts: AlertHistoryRecord[] }>(`/api/watchlist/history${query.toString() ? `?${query}` : ''}`);
+}
+
+export async function getSignals() {
+  return liveGet<{ status: string; active: any[]; history: any[] }>('/api/signals');
+}
+
+export async function closeSignal(symbol: string) {
+  const response = await client.post(`/api/watchlist/signals/${encodeURIComponent(symbol)}/close`, {});
+  clearApiCache();
+  return response.data as { status: string; message: string };
 }
 
 export type WatchlistAuditRecord = {
@@ -867,6 +1041,11 @@ export async function getV20Quote(symbol: string) {
   return liveGet(`/api/v20/quote/${encodeURIComponent(symbol)}`);
 }
 
+export async function getV20Quotes(symbols: string[]) {
+  if (!symbols.length) return { quotes: {} };
+  return liveGet(`/api/v20/quotes?symbols=${encodeURIComponent(symbols.join(','))}`);
+}
+
 export async function getQuickIntradaySignal(symbol: string, interval = '5m') {
   return liveGet(`/api/intraday/quick-signal/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(interval)}`);
 }
@@ -931,4 +1110,105 @@ export async function sendTelegramStockAlert(payload: Record<string, unknown>) {
   } catch (error: any) {
     throw new Error(error?.response?.data?.message || error?.message || 'Telegram alert failed');
   }
+}
+
+export type AlgoTradeSelection = {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  entry_price: number;
+  current_price: number;
+  stop_loss: number;
+  target: number;
+  confidence: number;
+  risk_reward: number;
+  profit_potential_pct: number;
+  volume_ratio: number;
+  selection_score: number;
+  strategy_reason: string;
+};
+
+export type AlgoStatusPayload = {
+  status: string;
+  paper_mode: boolean;
+  real_trading_enabled: boolean;
+  real_orders_disabled: boolean;
+  kotak_neo_connected: boolean;
+  selected_trade?: AlgoTradeSelection | null;
+  session?: Record<string, any> | null;
+  market_data: { connected: boolean; age_seconds: number; source: string };
+  portfolio?: Record<string, any>;
+  orders?: AlgoOrder[];
+  trades_today?: any[];
+  performance?: Record<string, any>;
+};
+
+export type AlgoOrder = {
+  order_id: string;
+  created_at: string;
+  symbol: string;
+  side: string;
+  quantity: number;
+  remaining_quantity: number;
+  entry_price: number;
+  current_price: number;
+  stop_loss: number;
+  trailing_stop_loss: number;
+  target: number;
+  status: string;
+  pnl: number;
+  exit_reason?: string;
+  confidence: number;
+  strategy_reason?: string;
+};
+
+export async function getAlgoStatus(): Promise<AlgoStatusPayload> {
+  return liveGet('/api/algo/status');
+}
+
+export async function startAlgoTrading(payload: {
+  capital: number;
+  max_trades: number;
+  max_loss: number;
+  risk_per_trade: number;
+  dummy_trading: boolean;
+  real_trading: boolean;
+}) {
+  const response = await client.post('/api/algo/start', payload);
+  return response.data;
+}
+
+export async function stopAlgoTrading(reason = 'Stopped by user') {
+  const response = await client.post('/api/algo/stop', { reason });
+  return response.data;
+}
+
+export async function getAlgoPortfolio() {
+  return liveGet('/api/algo/portfolio');
+}
+
+export async function getAlgoOrders(): Promise<{ orders: AlgoOrder[] }> {
+  return liveGet('/api/algo/orders');
+}
+
+export async function getAlgoTradesToday() {
+  return liveGet('/api/algo/trades/today');
+}
+
+export async function getAlgoPerformance() {
+  return liveGet('/api/algo/performance');
+}
+
+export async function placeDummyAlgoOrder(payload: Record<string, unknown>) {
+  const response = await client.post('/api/algo/dummy/place-order', payload);
+  return response.data;
+}
+
+export async function modifyDummyAlgoOrder(payload: Record<string, unknown>) {
+  const response = await client.post('/api/algo/dummy/modify-order', payload);
+  return response.data;
+}
+
+export async function cancelDummyAlgoOrder(orderId: string) {
+  const response = await client.post('/api/algo/dummy/cancel-order', { order_id: orderId });
+  return response.data;
 }

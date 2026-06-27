@@ -9,6 +9,10 @@ import { RootState } from '@/state/store';
 import { useToast } from '@/components/layout/ToastProvider';
 import { DataTable, MetricTile, PageHero, ProgressLine, TerminalPanel } from '@/components/terminal/TerminalPrimitives';
 import { scanTypes } from '@/lib/terminalData';
+import { useSearchParams } from 'next/navigation';
+import IntradayScannerTab from '@/components/organisms/IntradayScannerTab';
+import SwingScannerTab from '@/components/organisms/SwingScannerTab';
+import PremarketTab from '@/components/organisms/PremarketTab';
 
 const defaultScanPresets: Record<string, Record<string, string>> = {
   Premarket: {
@@ -88,6 +92,17 @@ const defaultScanPresets: Record<string, Record<string, string>> = {
   },
 };
 
+function formatRemainingTime(seconds: number | undefined | null) {
+  if (seconds === undefined || seconds === null || seconds < 0) return 'Estimating...';
+  if (seconds === 0) return 'Completed';
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins > 0) {
+    return `${mins}m ${secs}s left`;
+  }
+  return `${secs}s left`;
+}
+
 const defaultV4Filters = {
   minExpectedReturnPct: 5,
   minMlProbability: 62,
@@ -102,7 +117,23 @@ const defaultV4Filters = {
   notifyTelegram: false,
 };
 
-export default function ScanCenterPage() {
+function ScanCenterPageContent() {
+  const searchParams = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState<'universal' | 'intraday' | 'swing' | 'premarket'>('universal');
+
+  useEffect(() => {
+    if (tabParam === 'intraday') {
+      setActiveTab('intraday');
+    } else if (tabParam === 'swing') {
+      setActiveTab('swing');
+    } else if (tabParam === 'premarket') {
+      setActiveTab('premarket');
+    } else {
+      setActiveTab('universal');
+    }
+  }, [tabParam]);
+
   const dispatch = useDispatch();
   const toast = useToast();
   const scans = useSelector((state: RootState) => state.scan.scans);
@@ -166,15 +197,26 @@ export default function ScanCenterPage() {
         const [summaries, active] = await Promise.all([getScanSummaries(), getActiveScans()]);
         scanListFailuresRef.current = 0;
         dispatch(setScans(summaries));
-        setActiveScans(active.active_scans || active.scans || []);
-        const firstActive = (active.active_scans || active.scans || [])[0];
-        if (firstActive) {
-          setActiveScanId(firstActive.scan_id);
-          setActiveStatus(firstActive);
-        } else {
-          setActiveScanId(null);
-          setActiveStatus(null);
-        }
+        const activeList = active.active_scans || active.scans || [];
+        setActiveScans(activeList);
+        
+        setActiveScanId(currentId => {
+          if (activeList.length > 0) {
+            const exists = activeList.some((s: any) => s.scan_id === currentId);
+            if (exists) {
+              const match = activeList.find((s: any) => s.scan_id === currentId);
+              setActiveStatus(match);
+              return currentId;
+            } else {
+              const firstActive = activeList[0];
+              setActiveStatus(firstActive);
+              return firstActive.scan_id;
+            }
+          } else {
+            setActiveStatus(null);
+            return null;
+          }
+        });
       } catch (err) {
         scanListFailuresRef.current += 1;
         if (scanListFailuresRef.current === 3) {
@@ -315,11 +357,18 @@ export default function ScanCenterPage() {
     toast?.push('V4 filters restored', 'success');
   }
 
-  async function handleStop() {
-    if (!activeScanId) return;
+  async function handleStop(scanId?: string) {
+    const targetId = scanId || activeScanId;
+    if (!targetId) return;
     try {
-      await stopScan(activeScanId);
+      await stopScan(targetId as string);
       toast?.push('Stop request sent to backend', 'success');
+      setActiveScans((current) =>
+        current.map((s) => (s.scan_id === targetId ? { ...s, status: 'cancelled' } : s))
+      );
+      if (activeScanId === targetId) {
+        setActiveStatus((current: any) => (current ? { ...current, status: 'cancelled' } : null));
+      }
     } catch {
       toast?.push('Unable to stop active scan', 'error');
     }
@@ -337,23 +386,43 @@ export default function ScanCenterPage() {
     }
   }
 
-  async function handlePause() {
-    if (!activeScanId) return;
+  async function handlePause(scanId?: string) {
+    const targetId = scanId || activeScanId;
+    if (!targetId) return;
     try {
-      await pauseScan(activeScanId);
-      setActiveStatus((current: any) => ({ ...(current || {}), status: 'paused', pause_requested: true }));
+      await pauseScan(targetId as string);
       toast?.push('Pause request sent to backend', 'success');
+      setActiveScans((current) =>
+        current.map((s) =>
+          s.scan_id === targetId ? { ...s, status: 'paused', pause_requested: true } : s
+        )
+      );
+      if (activeScanId === targetId) {
+        setActiveStatus((current: any) =>
+          current ? { ...current, status: 'paused', pause_requested: true } : null
+        );
+      }
     } catch {
       toast?.push('Unable to pause active scan', 'error');
     }
   }
 
-  async function handleResume() {
-    if (!activeScanId) return;
+  async function handleResume(scanId?: string) {
+    const targetId = scanId || activeScanId;
+    if (!targetId) return;
     try {
-      await resumeScan(activeScanId);
-      setActiveStatus((current: any) => ({ ...(current || {}), status: 'running', pause_requested: false }));
+      await resumeScan(targetId as string);
       toast?.push('Resume request sent to backend', 'success');
+      setActiveScans((current) =>
+        current.map((s) =>
+          s.scan_id === targetId ? { ...s, status: 'running', pause_requested: false } : s
+        )
+      );
+      if (activeScanId === targetId) {
+        setActiveStatus((current: any) =>
+          current ? { ...current, status: 'running', pause_requested: false } : null
+        );
+      }
     } catch {
       toast?.push('Unable to resume active scan', 'error');
     }
@@ -379,7 +448,80 @@ export default function ScanCenterPage() {
 
   return (
     <main>
-      <PageHero
+      {/* Sub-navigation Tabs */}
+      <div style={{ display: 'flex', gap: '8px', padding: '16px 16px 0 16px', borderBottom: '1px solid var(--border)', marginBottom: '14px' }}>
+        <button
+          className={`btn-tab ${activeTab === 'universal' ? 'active' : ''}`}
+          onClick={() => setActiveTab('universal')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'universal' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'universal' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'universal' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Universal Scan Builder
+        </button>
+        <button
+          className={`btn-tab ${activeTab === 'intraday' ? 'active' : ''}`}
+          onClick={() => setActiveTab('intraday')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'intraday' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'intraday' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'intraday' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Intraday Scanner
+        </button>
+        <button
+          className={`btn-tab ${activeTab === 'swing' ? 'active' : ''}`}
+          onClick={() => setActiveTab('swing')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'swing' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'swing' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'swing' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Swing Scanner
+        </button>
+        <button
+          className={`btn-tab ${activeTab === 'premarket' ? 'active' : ''}`}
+          onClick={() => setActiveTab('premarket')}
+          style={{
+            padding: '8px 16px',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            background: activeTab === 'premarket' ? 'var(--panel-strong)' : 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'premarket' ? '2px solid var(--primary)' : 'none',
+            color: activeTab === 'premarket' ? 'var(--primary)' : 'var(--text-light)',
+            cursor: 'pointer'
+          }}
+        >
+          Premarket Pipeline
+        </button>
+      </div>
+
+      {activeTab === 'intraday' && <IntradayScannerTab />}
+      {activeTab === 'swing' && <SwingScannerTab />}
+      {activeTab === 'premarket' && <PremarketTab />}
+      {activeTab === 'universal' && (
+        <>
+          <PageHero
         eyebrow="Scan Center"
         title="Scanner V4"
         description="High-profit stock discovery with strict shortlist controls, validation pools, data-quality gates, and live backend task control."
@@ -425,7 +567,7 @@ export default function ScanCenterPage() {
         </div>
       )}
 
-      <div className="terminal-grid terminal-grid--split">
+      <div className="terminal-grid" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
         <TerminalPanel eyebrow="Scan Types" title="Priority Launcher">
           <div className="control-grid">
             {scanTypes.map((type) => (
@@ -464,30 +606,155 @@ export default function ScanCenterPage() {
           <div className="terminal-actions">
             <button className="btn-primary" onClick={handleStart}><Play size={15} /> Start</button>
             <button className="btn-secondary" onClick={handleResetPreset}><RotateCcw size={15} /> Reset Defaults</button>
-            <button className="btn-secondary" onClick={handlePause} disabled={!activeScanId || activeStatus?.status === 'paused'}><Pause size={15} /> Pause</button>
-            <button className="btn-secondary" onClick={handleResume} disabled={!activeScanId || activeStatus?.status !== 'paused'}><RotateCcw size={15} /> Resume</button>
-            <button className="btn-secondary" onClick={handleStop} disabled={!activeScanId}><Square size={15} /> Stop Selected</button>
+            <button className="btn-secondary" onClick={() => handlePause()} disabled={!activeScanId || activeStatus?.status === 'paused'}><Pause size={15} /> Pause</button>
+            <button className="btn-secondary" onClick={() => handleResume()} disabled={!activeScanId || activeStatus?.status !== 'paused'}><RotateCcw size={15} /> Resume</button>
+            <button className="btn-secondary" onClick={() => handleStop()} disabled={!activeScanId}><Square size={15} /> Stop Selected</button>
             <button className="btn-secondary" onClick={handleStopAll} disabled={!activeScans.length}><Square size={15} /> Stop All Active</button>
           </div>
         </TerminalPanel>
 
         <TerminalPanel eyebrow="Live Monitoring" title="Backend Task Status">
-          <div className="metric-grid metric-grid--compact">
+          <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginBottom: '16px' }}>
             <MetricTile label="Active Scans" value={activeScans.length} detail={activeScans.length ? 'multiple scans can run together' : visibleMessage} icon={Zap} tone={activeScans.length ? 'good' : latestScan ? 'info' : 'warn'} />
             <MetricTile label="Symbols Scanned" value={symbolsScanned} detail="from backend scan record" tone={symbolsScanned ? 'good' : 'warn'} />
             <MetricTile label="Candidates" value={candidates} detail="from backend scan record" tone={candidates ? 'good' : 'warn'} />
             <MetricTile label="Qualified" value={qualified} detail="from backend summary" tone={qualified ? 'good' : 'warn'} />
           </div>
-          <ProgressLine label={`Current Analysis Stage: ${currentStage}`} value={activeProgress} />
-          <DataTable
-            columns={['Scan Type', 'Status', 'Started', 'Action']}
-            rows={activeScans.map((scan: any) => [
-              scan.display_name || scan.scan_type || 'Scan',
-              <span key={`${scan.scan_id}-status`} className={scan.status === 'running' ? 'status-good' : scan.status === 'paused' ? 'status-warn' : 'status-bad'}>{scan.status}</span>,
-              scan.created_at || '-',
-              <button key={scan.scan_id} className="btn-secondary" onClick={() => { setActiveScanId(scan.scan_id); setActiveStatus(scan); }}>Select</button>,
-            ])}
-          />
+
+          {/* Detailed Selected Scan Card */}
+          {activeStatus && (
+            <div style={{
+              background: 'var(--surface-2)',
+              border: '1px solid var(--border-strong)',
+              borderRadius: '8px',
+              padding: '20px',
+              marginBottom: '20px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px',
+              boxShadow: 'var(--shadow)',
+              position: 'relative',
+              overflow: 'hidden'
+            }}>
+              <div style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '4px',
+                height: '100%',
+                background: activeStatus.status === 'running' ? 'var(--success)' : activeStatus.status === 'paused' ? 'var(--warning)' : 'var(--danger)'
+              }} />
+              
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <span style={{ fontSize: '0.68rem', textTransform: 'uppercase', fontWeight: 800, letterSpacing: '0.08em', color: 'var(--accent-2)' }}>Selected Active Scan Control</span>
+                  <h3 style={{ margin: '4px 0 0 0', fontSize: '1.25rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    {activeStatus.display_name || activeStatus.scan_type || 'Active Scan'}
+                    <span style={{
+                      fontSize: '0.72rem',
+                      fontFamily: 'monospace',
+                      background: 'rgba(255,255,255,0.06)',
+                      border: '1px solid var(--border)',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      color: 'var(--muted)'
+                    }}>{activeStatus.scan_id}</span>
+                  </h3>
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {activeStatus.status === 'running' && (
+                    <button className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', minHeight: '32px' }} onClick={() => handlePause(activeStatus.scan_id)}>
+                      <Pause size={14} /> Pause
+                    </button>
+                  )}
+                  {activeStatus.status === 'paused' && (
+                    <button className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', minHeight: '32px' }} onClick={() => handleResume(activeStatus.scan_id)}>
+                      <Play size={14} /> Resume
+                    </button>
+                  )}
+                  {['running', 'paused', 'queued'].includes(activeStatus.status) && (
+                    <button className="btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', minHeight: '32px', background: 'rgba(239, 68, 68, 0.2)', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#fff' }} onClick={() => handleStop(activeStatus.scan_id)}>
+                      <Square size={14} /> Terminate
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                gap: '16px',
+                borderTop: '1px solid var(--border)',
+                borderBottom: '1px solid var(--border)',
+                padding: '16px 0',
+                background: 'rgba(255,255,255,0.01)',
+                borderRadius: '4px'
+              }}>
+                <div style={{ padding: '0 12px' }}>
+                  <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--muted)', fontWeight: 800, textTransform: 'uppercase' }}>Status</span>
+                  <strong className={
+                    activeStatus.status === 'running' ? 'status-good' : activeStatus.status === 'paused' ? 'status-warn' : 'status-bad'
+                  } style={{ display: 'inline-block', marginTop: '4px', fontSize: '1rem', textTransform: 'uppercase' }}>
+                    {activeStatus.status}
+                  </strong>
+                </div>
+                <div style={{ padding: '0 12px', borderLeft: '1px solid var(--border)' }}>
+                  <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--muted)', fontWeight: 800, textTransform: 'uppercase' }}>Started At</span>
+                  <span style={{ display: 'inline-block', marginTop: '4px', fontSize: '0.9rem', fontWeight: 700 }}>{activeStatus.created_at || '-'}</span>
+                </div>
+                <div style={{ padding: '0 12px', borderLeft: '1px solid var(--border)' }}>
+                  <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--muted)', fontWeight: 800, textTransform: 'uppercase' }}>Estimated Remaining</span>
+                  <span style={{ display: 'inline-block', marginTop: '4px', fontSize: '0.9rem', fontWeight: 700, color: 'var(--accent)' }}>
+                    {formatRemainingTime(activeStatus.remaining_seconds)}
+                  </span>
+                </div>
+                <div style={{ padding: '0 12px', borderLeft: '1px solid var(--border)' }}>
+                  <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--muted)', fontWeight: 800, textTransform: 'uppercase' }}>Current Progress</span>
+                  <span style={{ display: 'inline-block', marginTop: '4px', fontSize: '0.9rem', fontWeight: 700 }}>{activeStatus.progress ?? 0}%</span>
+                </div>
+              </div>
+
+              <div>
+                <span style={{ display: 'block', fontSize: '0.68rem', color: 'var(--muted)', fontWeight: 800, textTransform: 'uppercase', marginBottom: '6px' }}>Current Activity Stage</span>
+                <ProgressLine value={activeStatus.progress ?? 0} label={activeStatus.status_message || activeStatus.message || 'Scanning stock universe...'} />
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: '10px' }}>
+            <DataTable
+              columns={['Scan Type', 'Status', 'Progress', 'Remaining Time', 'Started', 'Actions']}
+              rows={activeScans.map((scan: any) => [
+                scan.display_name || scan.scan_type || 'Scan',
+                <span key={`${scan.scan_id}-status`} className={
+                  scan.status === 'running' ? 'status-good' : scan.status === 'paused' ? 'status-warn' : 'status-bad'
+                } style={{ fontWeight: 800 }}>{scan.status}</span>,
+                <span key={`${scan.scan_id}-progress`} style={{ fontWeight: 700 }}>{scan.progress ?? 0}%</span>,
+                <span key={`${scan.scan_id}-remaining`} style={{ color: 'var(--accent)', fontWeight: 700 }}>{formatRemainingTime(scan.remaining_seconds)}</span>,
+                scan.created_at || '-',
+                <div key={`${scan.scan_id}-actions`} style={{ display: 'flex', gap: '6px' }}>
+                  <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: '0.75rem', minHeight: '26px' }} onClick={() => { setActiveScanId(scan.scan_id); setActiveStatus(scan); }}>
+                    Details
+                  </button>
+                  {scan.status === 'running' && (
+                    <button className="btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem', minHeight: '26px' }} onClick={() => handlePause(scan.scan_id)} title="Pause Scan">
+                      <Pause size={12} />
+                    </button>
+                  )}
+                  {scan.status === 'paused' && (
+                    <button className="btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem', minHeight: '26px' }} onClick={() => handleResume(scan.scan_id)} title="Resume Scan">
+                      <Play size={12} />
+                    </button>
+                  )}
+                  {['running', 'paused', 'queued'].includes(scan.status) && (
+                    <button className="btn-secondary" style={{ padding: '4px 8px', fontSize: '0.75rem', minHeight: '26px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#fff' }} onClick={() => handleStop(scan.scan_id)} title="Terminate Scan">
+                      <Square size={12} />
+                    </button>
+                  )}
+                </div>
+              ])}
+            />
+          </div>
         </TerminalPanel>
       </div>
 
@@ -495,6 +762,16 @@ export default function ScanCenterPage() {
         <DataTable columns={['Scan ID', 'Type', 'Status', 'Qualified / Scanned', 'Created']} rows={rows} />
         {loading && <p className="small">Loading scan queue...</p>}
       </TerminalPanel>
+      </>
+      )}
     </main>
+  );
+}
+
+export default function ScanCenterPage() {
+  return (
+    <React.Suspense fallback={<div style={{ padding: '40px', textAlign: 'center', color: 'var(--muted)', fontFamily: 'monospace' }}>Loading Scanner V4...</div>}>
+      <ScanCenterPageContent />
+    </React.Suspense>
   );
 }

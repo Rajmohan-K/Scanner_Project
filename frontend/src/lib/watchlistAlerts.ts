@@ -13,8 +13,14 @@ export const DEFAULT_WATCHLIST_ALERT_SETTINGS: AlertSettings = {
   price_move_pct_threshold: 1.5,
   half_percent_move_threshold: 0.5,
   cooldown_seconds: 900,
-  monitoring_interval_seconds: 10,
+  monitoring_interval_seconds: 1,
   desktop_enabled: true,
+  browser_alerts_enabled: true,
+  volume_alerts_enabled: true,
+  target_alerts_enabled: true,
+  stop_loss_alerts_enabled: true,
+  buy_alerts_enabled: true,
+  sell_alerts_enabled: true,
   sound_enabled: true,
   telegram_enabled: false,
   watchlist_monitoring_enabled: true,
@@ -32,6 +38,9 @@ export const DEFAULT_WATCHLIST_ALERT_SETTINGS: AlertSettings = {
   gtt_plan_enabled: true,
   future_auto_trade_enabled: false,
   market_hours_only: false,
+  avoid_negative_alerts: true,
+  auto_add_candidates: false,
+  price_surge_pct: 0.75,
 };
 
 function browserStorage() {
@@ -100,7 +109,7 @@ export function isDesktopNotified(alertId?: string) {
   return Boolean(alertId && readNotifiedDesktopIds().has(alertId));
 }
 
-export function playWatchlistAlertTone(severity?: string) {
+export function playWatchlistAlertTone(severity?: string, actionOrType?: string) {
   if (typeof window === 'undefined') return;
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -119,8 +128,25 @@ export function playWatchlistAlertTone(severity?: string) {
     };
 
     const play = () => {
+      const text = String(actionOrType || '').toUpperCase();
       const sev = String(severity || '').toLowerCase();
-      if (sev === 'high') {
+
+      const isBuy = text.includes('BUY') || text.includes('LONG');
+      const isSell = text.includes('SELL') || text.includes('SHORT');
+
+      if (isBuy) {
+        // Rising arpeggio (C5 -> E5 -> G5 -> C6)
+        playBeep(523.25, 0.10, 0.00, 0.05);
+        playBeep(659.25, 0.10, 0.12, 0.05);
+        playBeep(783.99, 0.10, 0.24, 0.05);
+        playBeep(1046.50, 0.22, 0.36, 0.06);
+      } else if (isSell) {
+        // Descending warning arpeggio (C6 -> G5 -> E5 -> C5)
+        playBeep(1046.50, 0.10, 0.00, 0.06);
+        playBeep(783.99, 0.10, 0.12, 0.05);
+        playBeep(659.25, 0.10, 0.24, 0.05);
+        playBeep(523.25, 0.22, 0.36, 0.05);
+      } else if (sev === 'high') {
         // Strong double beep: louder (0.05 vol), 880 Hz
         playBeep(880, 0.12, 0, 0.05);
         playBeep(880, 0.12, 0.16, 0.05);
@@ -162,14 +188,21 @@ export function notifyWatchlistAlert(
   markAlertSeen(alert.alert_id);
   dispatchWatchlistAlert(alert);
 
+  const sev = String(alert.severity || '').toUpperCase();
+  const isPriority = sev === 'CRITICAL' || sev === 'HIGH';
+
+  if (!isPriority) {
+    return true;
+  }
+
   const title = `${alert.symbol}: ${alert.action || alert.alert_type}`;
   const body = alert.reason || alert.message || '';
-  const toastType = alert.severity === 'high' ? 'success' : 'info';
+  const toastType = (sev === 'CRITICAL' || sev === 'HIGH') ? 'success' : 'info';
 
   toast?.push(title, toastType, { dedupeKey: `watchlist:${alert.alert_id}`, desktop: false });
 
   if (settings.sound_enabled) {
-    playWatchlistAlertTone(alert.severity);
+    playWatchlistAlertTone(alert.severity, alert.action || alert.alert_type);
   }
 
   const desktopEnabled = settings.desktop_enabled !== false && alert.desktop_sent !== false;
@@ -178,8 +211,7 @@ export function notifyWatchlistAlert(
     && typeof window !== 'undefined'
     && 'Notification' in window
   ) {
-    const sev = String(alert.severity || '').toLowerCase();
-    const requireInteraction = sev === 'high' || sev === 'medium';
+    const requireInteraction = sev === 'HIGH' || sev === 'CRITICAL';
     
     const showNotification = () => {
       new window.Notification(`Stock Alert: ${alert.symbol}`, { 

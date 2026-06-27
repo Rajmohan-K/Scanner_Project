@@ -1,4 +1,4 @@
-import { getLiveStockAnalysis, type StockAnalysisPayload, type StockTradePlan } from '@/lib/api';
+import { getLiveStockAnalysis, getV20Quotes, type StockAnalysisPayload, type StockTradePlan } from '@/lib/api';
 
 export type AnalysisHorizon = 'intraday' | 'swing';
 
@@ -123,4 +123,34 @@ export async function hydrateRowsWithMasterAnalysis(rows: any[], limit = 30) {
     hydrated.push(...batchRows);
   }
   return [...hydrated, ...rows.slice(limit)];
+}
+
+export async function hydrateRowsWithBatchQuotes(rows: any[]) {
+  if (!rows.length) return rows;
+  const symbols = Array.from(new Set(rows.map(stockSymbol).filter(Boolean)));
+  if (!symbols.length) return rows;
+  try {
+    const payload = await getV20Quotes(symbols);
+    const quotes = payload?.quotes || {};
+    return rows.map((row) => {
+      const sym = stockSymbol(row);
+      const quote = quotes[sym];
+      if (!quote) return row;
+      const live = Number(quote.current_price ?? quote.regularMarketPrice ?? quote.price ?? quote.last_close ?? row.live_price ?? row.current_price ?? 0);
+      const prev = Number(quote.previous_close ?? row.previous_close ?? 0);
+      const change = live - prev;
+      const change_pct = prev ? (change / prev) * 100 : 0;
+      return {
+        ...row,
+        live_price: live,
+        current_price: live,
+        previous_close: prev,
+        change: Math.round(change * 100) / 100,
+        change_pct: Math.round(change_pct * 100) / 100,
+      };
+    });
+  } catch (err) {
+    console.error("Failed to hydrate rows with batch quotes:", err);
+    return rows;
+  }
 }
